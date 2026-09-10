@@ -1,0 +1,56 @@
+{
+  "name": "pi-dev-team",
+  "version": "0.2.6",
+  "description": "Pi extension: /devteam runs a planner, optional designer, and specialized implementors with official stack skills.",
+  "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/W4775/pi-dev-team.git"
+  },
+  "homepage": "https://github.com/W4775/pi-dev-team",
+  "bugs": {
+    "url": "https://github.com/W4775/pi-dev-team/issues"
+  },
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "src",
+    "roles",
+    "skills",
+    "catalog",
+    "NOTICE",
+    "README.md",
+    "WHERE-IS-WORKFLOW-STATE.md",
+    "LICENSE",
+    "vendor-licenses"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  },
+  "dependencies": {
+    "typebox": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
+  },
+  "omp": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

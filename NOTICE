@@ -1,0 +1,24 @@
+pi-dev-team
+===========
+
+This package implements a Pi coding-agent extension (`/devteam`).
+
+Third-party material
+--------------------
+
+This product includes adapted copies of:
+
+1. Skills originally published in https://github.com/mattpocock/skills (MIT License)
+   Copyright (c) Matt Pocock
+   See vendor-licenses/mattpocock-MIT.txt and the adaptation notes in each
+   skills/*/SKILL.md file. The following skills were adapted: grilling, to-spec,
+   to-tickets, codebase-design, tdd, implement, code-review, diagnosing-bugs.
+
+2. The frontend-design skill from Anthropic's Claude Code plugins
+   (Apache License 2.0). Copyright Anthropic.
+   See skills/frontend-design/LICENSE.txt and skills/frontend-design/SKILL.md.
+
+Official language and framework Agent Skills (Angular, React Native, Vue, .NET,
+Neon Postgres, and others listed in catalog/stacks.json) are not redistributed
+in this package. At run time they may be fetched into
+`~/.pi/agent/devteam/skill-cache/` from their upstream git repositories.

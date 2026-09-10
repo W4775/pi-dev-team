@@ -1,0 +1,220 @@
+{
+  "maxSkillsPerChild": 3,
+  "stacks": [
+    {
+      "id": "react-native",
+      "layer": "frontend",
+      "uiSurface": "native",
+      "match": { "deps": ["react-native", "expo"] },
+      "skills": [
+        {
+          "name": "vercel-react-native-skills",
+          "repo": "vercel-labs/agent-skills",
+          "ref": "main",
+          "path": "skills/react-native-skills"
+        }
+      ]
+    },
+    {
+      "id": "angular",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "match": { "deps": ["@angular/core"], "files": ["angular.json"] },
+      "skills": [
+        {
+          "name": "angular-developer",
+          "repo": "angular/skills",
+          "ref": "main",
+          "path": "angular-developer"
+        }
+      ]
+    },
+    {
+      "id": "angular-new-app",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "additive": true,
+      "requires": "angular",
+      "match": { "missingFiles": ["angular.json"], "plannerHint": "new-angular-app" },
+      "skills": [
+        {
+          "name": "angular-new-app",
+          "repo": "angular/skills",
+          "ref": "main",
+          "path": "angular-new-app"
+        }
+      ]
+    },
+    {
+      "id": "next",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "match": { "deps": ["next"] },
+      "skills": [
+        {
+          "name": "vercel-react-best-practices",
+          "repo": "vercel-labs/agent-skills",
+          "ref": "main",
+          "path": "skills/react-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "vue",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "match": { "deps": ["vue"] },
+      "skills": [
+        {
+          "name": "vue-best-practices",
+          "repo": "vuejs-ai/skills",
+          "ref": "main",
+          "path": "skills/vue-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "vue-pinia",
+      "layer": "frontend",
+      "additive": true,
+      "requires": "vue",
+      "match": { "deps": ["pinia"] },
+      "skills": [
+        {
+          "name": "vue-pinia-best-practices",
+          "repo": "vuejs-ai/skills",
+          "ref": "main",
+          "path": "skills/vue-pinia-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "vue-router",
+      "layer": "frontend",
+      "additive": true,
+      "requires": "vue",
+      "match": { "deps": ["vue-router"] },
+      "skills": [
+        {
+          "name": "vue-router-best-practices",
+          "repo": "vuejs-ai/skills",
+          "ref": "main",
+          "path": "skills/vue-router-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "blazor",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "match": {
+        "csprojContains": ["Microsoft.AspNetCore.Components", "Microsoft.NET.Sdk.BlazorWebAssembly"]
+      },
+      "skills": [
+        {
+          "name": "author-component",
+          "repo": "dotnet/skills",
+          "ref": "main",
+          "path": "plugins/dotnet-blazor/skills/author-component"
+        },
+        {
+          "name": "plan-ui-change",
+          "repo": "dotnet/skills",
+          "ref": "main",
+          "path": "plugins/dotnet-blazor/skills/plan-ui-change"
+        }
+      ]
+    },
+    {
+      "id": "react",
+      "layer": "frontend",
+      "uiSurface": "web",
+      "match": { "deps": ["react"] },
+      "skills": [
+        {
+          "name": "vercel-react-best-practices",
+          "repo": "vercel-labs/agent-skills",
+          "ref": "main",
+          "path": "skills/react-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "dotnet",
+      "layer": "backend",
+      "match": {
+        "files": ["*.csproj", "*.fsproj", "*.vbproj", "global.json", "*.sln"],
+        "csprojContains": ["Microsoft.NET.Sdk.Web", "Microsoft.AspNetCore"]
+      },
+      "skills": [
+        {
+          "name": "dotnet-webapi",
+          "repo": "dotnet/skills",
+          "ref": "main",
+          "path": "plugins/dotnet-aspnetcore/skills/dotnet-webapi"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "layer": "database",
+      "match": {
+        "prismaProvider": "postgresql",
+        "envContains": ["postgres://", "postgresql://"],
+        "composeImages": ["postgres"],
+        "deps": ["pg", "postgres", "@neondatabase/serverless"]
+      },
+      "skills": [
+        {
+          "name": "postgres-best-practices",
+          "repo": "neondatabase/postgres-skills",
+          "ref": "main",
+          "path": "skills/postgres-best-practices"
+        }
+      ]
+    },
+    {
+      "id": "efcore",
+      "layer": "database",
+      "match": { "csprojContains": ["Microsoft.EntityFrameworkCore"] },
+      "skills": [
+        {
+          "name": "optimizing-ef-core-queries",
+          "repo": "dotnet/skills",
+          "ref": "main",
+          "path": "plugins/dotnet-data/skills/optimizing-ef-core-queries"
+        }
+      ]
+    },
+    {
+      "id": "dotnet-test",
+      "layer": "tester",
+      "additive": true,
+      "requires": "dotnet",
+      "match": { "files": ["*.csproj"] },
+      "skills": [
+        {
+          "name": "run-tests",
+          "repo": "dotnet/skills",
+          "ref": "main",
+          "path": "plugins/dotnet-test/skills/run-tests"
+        }
+      ]
+    },
+    {
+      "id": "vue-testing",
+      "layer": "tester",
+      "additive": true,
+      "requires": "vue",
+      "match": { "deps": ["vue"] },
+      "skills": [
+        {
+          "name": "vue-testing-best-practices",
+          "repo": "vuejs-ai/skills",
+          "ref": "main",
+          "path": "skills/vue-testing-best-practices"
+        }
+      ]
+    }
+  ]
+}
