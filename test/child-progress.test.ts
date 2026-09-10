@@ -4,6 +4,7 @@ import {
   activityLine,
   createProgressParser,
   describeToolCall,
+  isMutatingToolLabel,
   isRepeatedToolLoop,
   isUsefulLabel,
   progressFromLine,
@@ -14,6 +15,7 @@ import {
 
 test("tool calls keep the path, streamed tokens like hub do not", () => {
   assert.equal(describeToolCall("read", { path: "src/app/hub.tsx" }), "read src/app/hub.tsx");
+  assert.equal(describeToolCall("read", { path: "src/app/hub.tsx", offset: 80, limit: 80 }), "read src/app/hub.tsx:80+80");
   assert.equal(isUsefulLabel("hub", "text"), false);
   assert.equal(isUsefulLabel("the", "text"), false);
   assert.equal(isUsefulLabel("read src/app/hub.tsx", "tool"), true);
@@ -55,12 +57,26 @@ test("idle timeout defaults to 8 minutes and can be disabled", () => {
   assert.equal(resolveChildIdleMs(60), 60_000);
 });
 
-test("repeat-tool abort defaults to 8 and detects a stuck label", () => {
+test("repeat-tool abort ignores edits, bare names, and paginated reads", () => {
   assert.equal(resolveRepeatToolAbort(undefined), 8);
   assert.equal(resolveRepeatToolAbort(0), 0);
+  assert.equal(isMutatingToolLabel("edit src/app/page.tsx"), true);
+  assert.equal(isMutatingToolLabel("read src/app/page.tsx"), false);
+  const edits = Array.from({ length: 8 }, () => "edit src/app/hub.tsx");
+  assert.equal(isRepeatedToolLoop(edits, 8), false);
+  const writes = Array.from({ length: 8 }, () => "write src/app/hub.tsx");
+  assert.equal(isRepeatedToolLoop(writes, 8), false);
+  const bash = Array.from({ length: 8 }, () => "bash: npm test");
+  assert.equal(isRepeatedToolLoop(bash, 8), false);
+  const bareReads = Array.from({ length: 8 }, () => "read");
+  assert.equal(isRepeatedToolLoop(bareReads, 8), false);
   assert.equal(isRepeatedToolLoop(["read a", "read a", "read a"], 3), true);
   assert.equal(isRepeatedToolLoop(["read a", "read b", "read a"], 3), false);
   assert.equal(isRepeatedToolLoop(["read a", "read a"], 3), false);
+  assert.equal(
+    isRepeatedToolLoop(["read src/app/hub.tsx:0+80", "read src/app/hub.tsx:80+80", "read src/app/hub.tsx:160+80"], 3),
+    false,
+  );
 });
 
 test("thinking and text token deltas are not tool calls", () => {
@@ -189,4 +205,41 @@ test("a streamed read plus thinking tokens is one tool call, not a repeat loop",
   const tools = updates.filter((update) => update.kind === "tool").map((update) => update.label);
   assert.equal(tools.length, 1);
   assert.equal(isRepeatedToolLoop(tools, 8), false);
+});
+
+test("duplicate events for the same toolCallId count as one call", () => {
+  const parser = createProgressParser();
+  const lines = [
+    { type: "tool_execution_start", toolCallId: "call_1", toolName: "edit", args: { path: "src/app/hub.tsx" } },
+    { type: "tool", name: "edit", id: "call_1", input: { path: "src/app/hub.tsx" } },
+    { type: "tool_execution_start", toolCallId: "call_1", toolName: "edit", args: { path: "src/app/hub.tsx" } },
+  ];
+  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  assert.equal(tools.length, 1);
+});
+
+test("eight frontend edits of the same file are not a stuck loop", () => {
+  const parser = createProgressParser();
+  const lines = Array.from({ length: 8 }, (_, i) => ({
+    type: "tool_execution_start",
+    toolCallId: `edit_${i}`,
+    toolName: "edit",
+    args: { path: "src/app/hub.tsx" },
+  }));
+  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  assert.equal(tools.length, 8);
+  assert.equal(isRepeatedToolLoop(tools.map((update) => update.label), 8), false);
+});
+
+test("eight start events with no path do not abort as identical reads", () => {
+  const parser = createProgressParser();
+  const lines = Array.from({ length: 8 }, (_, i) => ({
+    type: "tool_execution_start",
+    toolCallId: `read_${i}`,
+    toolName: "read",
+  }));
+  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  assert.equal(tools.length, 8);
+  assert.equal(tools.every((update) => update.label === "read"), true);
+  assert.equal(isRepeatedToolLoop(tools.map((update) => update.label), 8), false);
 });

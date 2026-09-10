@@ -7,6 +7,7 @@
 import {
   DEFAULT_BUILD_TOOL_CALLS,
   DEFAULT_MAX_TOOL_CALLS,
+  DEFAULT_REPEAT_TOOL_ABORT,
   MAX_TOOL_CALLS_CAP,
   SCOUT_MAX_TOOL_CALLS,
 } from "./types.ts";
@@ -14,7 +15,10 @@ import {
 export type ProgressUpdate = {
   kind: "tool" | "text";
   label: string;
+  toolCallId?: string;
 };
+
+const MUTATING_TOOL_PREFIX = /^(edit|write|bash|handoff|mockup)\b/i;
 
 const TOOL_EVENT_TYPES = new Set([
   "tool",
@@ -41,6 +45,37 @@ function firstString(source: Record<string, unknown> | undefined, keys: string[]
   return undefined;
 }
 
+function firstNumber(source: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+  if (!source) return undefined;
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return value.trim();
+  }
+  return undefined;
+}
+
+function toolArgs(node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!node) return undefined;
+  const direct = node.input ?? node.args ?? node.parameters;
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>;
+  }
+  const call = node.toolCall;
+  if (call && typeof call === "object" && !Array.isArray(call)) {
+    const nested = call as Record<string, unknown>;
+    const fromCall = nested.arguments ?? nested.input ?? nested.args ?? nested.parameters;
+    if (fromCall && typeof fromCall === "object" && !Array.isArray(fromCall)) {
+      return fromCall as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function toolCallIdOf(node: Record<string, unknown>): string | undefined {
+  return firstString(node, ["toolCallId", "id", "callId"]);
+}
+
 function shorten(text: string, max: number): string {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
@@ -53,7 +88,7 @@ function tail(path: string, segments = 3): string {
 
 export function describeToolCall(name: string, input: unknown): string {
   const tool = name.trim();
-  const args = input && typeof input === "object" ? (input as Record<string, unknown>) : undefined;
+  const args = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined;
   const path = firstString(args, PATH_KEYS);
   const command = firstString(args, COMMAND_KEYS);
   const query = firstString(args, QUERY_KEYS);
@@ -72,7 +107,12 @@ export function describeToolCall(name: string, input: unknown): string {
     const action = firstString(args, ["action"]) ?? "write";
     return `mockup ${action}`;
   }
-  if (path) return `${tool} ${tail(path)}`;
+  if (path) {
+    const offset = firstNumber(args, ["offset", "offsetLines", "startLine", "start"]);
+    const limit = firstNumber(args, ["limit", "line_limit", "count", "endLine"]);
+    const range = offset || limit ? `:${offset ?? "0"}+${limit ?? "?"}` : "";
+    return `${tool} ${tail(path)}${range}`;
+  }
   if (query) return `${tool} "${shorten(query, 40)}"`;
   if (command) return `${tool}: ${shorten(command, 60)}`;
   return tool;
@@ -98,8 +138,10 @@ function updateFromContentItem(item: unknown): ProgressUpdate | undefined {
   if (TOOL_EVENT_TYPES.has(type)) {
     const name = firstString(node, ["name", "toolName", "tool"]);
     if (!name) return undefined;
-    const label = describeToolCall(name, node.input ?? node.args ?? node.parameters);
-    return isUsefulLabel(label, "tool") ? { kind: "tool", label } : undefined;
+    const label = describeToolCall(name, toolArgs(node));
+    return isUsefulLabel(label, "tool")
+      ? { kind: "tool", label, toolCallId: toolCallIdOf(node) }
+      : undefined;
   }
   const text = firstString(node, ["text", "content"]);
   if (text && isUsefulLabel(text, "text")) return { kind: "text", label: shorten(text, 100) };
@@ -142,8 +184,10 @@ const IGNORE_TYPES = new Set([
 function toolLabel(node: Record<string, unknown>): ProgressUpdate | undefined {
   const name = firstString(node, ["toolName", "tool", "name"]);
   if (!name) return undefined;
-  const label = describeToolCall(name, node.input ?? node.args ?? node.parameters ?? node.toolCall);
-  return isUsefulLabel(label, "tool") ? { kind: "tool", label } : undefined;
+  const label = describeToolCall(name, toolArgs(node));
+  return isUsefulLabel(label, "tool")
+    ? { kind: "tool", label, toolCallId: toolCallIdOf(node) }
+    : undefined;
 }
 
 export function progressFromEvent(event: unknown): ProgressUpdate | undefined {
@@ -209,6 +253,15 @@ export function createProgressParser(): {
   flush(): ProgressUpdate[];
 } {
   let buffer = "";
+  const seenToolCalls = new Set<string>();
+  const take = (update: ProgressUpdate | undefined): ProgressUpdate | undefined => {
+    if (!update) return undefined;
+    if (update.kind === "tool" && update.toolCallId) {
+      if (seenToolCalls.has(update.toolCallId)) return undefined;
+      seenToolCalls.add(update.toolCallId);
+    }
+    return update;
+  };
   return {
     push(chunk: string): ProgressUpdate[] {
       buffer += chunk;
@@ -216,7 +269,7 @@ export function createProgressParser(): {
       buffer = lines.pop() ?? "";
       const updates: ProgressUpdate[] = [];
       for (const line of lines) {
-        const update = progressFromLine(line);
+        const update = take(progressFromLine(line));
         if (update) updates.push(update);
       }
       return updates;
@@ -224,7 +277,7 @@ export function createProgressParser(): {
     flush(): ProgressUpdate[] {
       const rest = buffer;
       buffer = "";
-      const update = progressFromLine(rest);
+      const update = take(progressFromLine(rest));
       return update ? [update] : [];
     },
   };
@@ -263,16 +316,31 @@ export function resolveChildIdleMs(configured?: number): number {
 
 export function resolveRepeatToolAbort(configured?: number): number {
   const value = Number(configured);
-  if (!Number.isFinite(value)) return 8;
+  if (!Number.isFinite(value)) return DEFAULT_REPEAT_TOOL_ABORT;
   if (value <= 0) return 0;
   return Math.min(Math.floor(value), 40);
 }
 
-/** True when the last `limit` tool labels are identical. */
+function looksLikeTargetedCall(label: string): boolean {
+  return /\s/.test(label.trim());
+}
+
+/** Edit/write/bash on the same file is normal implementor work, not a stuck loop. */
+export function isMutatingToolLabel(label: string): boolean {
+  return MUTATING_TOOL_PREFIX.test(label.trim());
+}
+
+/**
+ * True when the last `limit` calls are the same *inspect* of the same target.
+ * Bare names (`read` with no path) and mutating tools never count — those are
+ * how a frontend pass actually works.
+ */
 export function isRepeatedToolLoop(labels: string[], limit: number): boolean {
   if (limit < 2 || labels.length < limit) return false;
-  const tail = labels.slice(-limit);
-  return tail.every((label) => label === tail[0]);
+  const streak = labels.slice(-limit);
+  const first = streak[0]?.trim() ?? "";
+  if (!first || !looksLikeTargetedCall(first) || isMutatingToolLabel(first)) return false;
+  return streak.every((label) => label === streak[0]);
 }
 
 export function formatElapsed(ms: number): string {
