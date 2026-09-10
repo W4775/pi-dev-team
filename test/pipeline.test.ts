@@ -19,6 +19,7 @@ import {
   startImplementation,
   startScouting,
   startSequentialImplementation,
+  neededImplementors,
 } from "../src/pipeline.ts";
 import { MAX_FIX_ROUNDS } from "../src/types.ts";
 import type { RunState } from "../src/types.ts";
@@ -292,6 +293,82 @@ test("empty layers needed routes to general only", () => {
   assert.deepEqual(next.implementorQueue, ["general"]);
 });
 
+test("needed implementors skip layers with no work", () => {
+  assert.deepEqual(neededImplementors(run({ layersNeeded: ["backend"] })), ["backend"]);
+  assert.deepEqual(
+    neededImplementors(run({ layersNeeded: ["frontend", "database", "backend"] })),
+    ["database", "backend", "frontend"],
+  );
+  assert.deepEqual(
+    neededImplementors(
+      run({
+        layersNeeded: ["database", "backend", "frontend"],
+        filesToChange: { backend: ["src/api.ts"] },
+      }),
+    ),
+    ["backend"],
+  );
+  assert.deepEqual(
+    neededImplementors(
+      run({
+        layersNeeded: ["database", "backend", "frontend"],
+        backendNotes: "Add POST /settings",
+      }),
+    ),
+    ["backend"],
+  );
+  assert.deepEqual(
+    neededImplementors(
+      run({
+        layersNeeded: ["backend", "frontend"],
+        backendNotes: "API",
+        frontendNotes: "Settings page",
+      }),
+    ),
+    ["backend", "frontend"],
+  );
+  assert.deepEqual(
+    startSequentialImplementation(run({ layersNeeded: ["frontend"] })).implementorQueue,
+    ["frontend"],
+  );
+});
+
+test("work_planned drops work items for layers this change does not need", () => {
+  const planned = applyHandoff(
+    run({
+      stage: "orchestrate",
+      currentRole: "orchestrator",
+      layersNeeded: ["backend"],
+      workItems: [
+        {
+          id: "route",
+          layer: "backend",
+          title: "POST /settings",
+          files: ["src/server/**"],
+          dependsOn: [],
+          status: "pending",
+          attempts: 0,
+        },
+        {
+          id: "page",
+          layer: "frontend",
+          title: "Settings page",
+          files: ["src/app/**"],
+          dependsOn: [],
+          status: "pending",
+          attempts: 0,
+        },
+      ],
+    }),
+    "work_planned",
+  );
+  assert.deepEqual(
+    planned.workItems?.map((item) => item.layer),
+    ["backend"],
+  );
+  assert.deepEqual(planned.implementorQueue, ["backend"]);
+});
+
 test("plan rewrite skip restores original spec and keeps executing", () => {
   const next = applySkip(
     run({
@@ -308,20 +385,33 @@ test("plan rewrite skip restores original spec and keeps executing", () => {
   assert.equal(next.stage, "orchestrate");
 });
 
-test("implementor_done walks the queue then reviewer", () => {
+test("implementor_done reviews a layer before the next implementor", () => {
   const first = applyHandoff(
     run({
       stage: "implement",
       implementorQueue: ["database", "frontend"],
       implementorIndex: 0,
       currentRole: "database",
+      layersNeeded: ["database", "frontend"],
     }),
     "implementor_done",
   );
-  assert.equal(first.currentRole, "frontend");
-  assert.equal(first.implementorIndex, 1);
-  const second = applyHandoff(first, "implementor_done");
-  assert.equal(second.stage, "reviewer");
+  assert.equal(first.stage, "reviewer");
+  assert.equal(first.reviewLayer, "database");
+  assert.equal(first.currentRole, "reviewer");
+
+  const nextLayer = applyHandoff(first, "qa_pass");
+  assert.equal(nextLayer.stage, "implement");
+  assert.equal(nextLayer.currentRole, "frontend");
+  assert.equal(nextLayer.implementorIndex, 1);
+  assert.equal(nextLayer.reviewLayer, undefined);
+
+  const secondReview = applyHandoff(nextLayer, "implementor_done");
+  assert.equal(secondReview.stage, "reviewer");
+  assert.equal(secondReview.reviewLayer, "frontend");
+
+  const afterLast = applyHandoff(secondReview, "qa_pass");
+  assert.equal(afterLast.stage, "tester");
 });
 
 test("qa_fail starts a fix round until the cap", () => {
@@ -341,9 +431,43 @@ test("qa_fail starts a fix round until the cap", () => {
   assert.equal(capped.pauseReason, undefined);
 });
 
-test("skip after review accepts blockers and goes to tester", () => {
-  const next = applySkip(run({ stage: "reviewer", pauseReason: "fix_review_max" }));
-  assert.equal(next.stage, "tester");
+test("qa_fail cap on a mid-pipeline layer starts the next layer", () => {
+  let current = run({
+    stage: "reviewer",
+    reviewLayer: "database",
+    implementorQueue: ["database", "backend"],
+    implementorIndex: 0,
+    layersNeeded: ["database", "backend"],
+    reviewFindings: [{ axis: "spec", severity: "block", text: "- [block] src/db.ts: missing", files: ["src/db.ts"] }],
+  });
+  for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
+    current = applyHandoff(current, "qa_fail");
+    assert.equal(current.stage, "fix_review");
+    assert.deepEqual(current.implementorQueue, ["database"]);
+    current = { ...current, stage: "reviewer", reviewFindings: current.reviewFindings };
+  }
+  const capped = applyHandoff(current, "qa_fail");
+  assert.equal(capped.stage, "implement");
+  assert.equal(capped.currentRole, "backend");
+  assert.equal(capped.reviewLayer, undefined);
+});
+
+test("qa_fail fix round stays on the reviewed layer", () => {
+  const next = applyHandoff(
+    run({
+      stage: "reviewer",
+      reviewLayer: "backend",
+      implementorQueue: ["database", "backend", "frontend"],
+      layersNeeded: ["database", "backend", "frontend"],
+      reviewFindings: [
+        { axis: "spec", severity: "block", text: "- [block] src/server.ts: missing", files: ["src/server.ts"] },
+      ],
+    }),
+    "qa_fail",
+  );
+  assert.equal(next.stage, "fix_review");
+  assert.deepEqual(next.implementorQueue, ["backend"]);
+  assert.equal(next.reviewLayer, "backend");
 });
 
 test("blocked files map to implementor layers in pipeline order", () => {
@@ -398,7 +522,7 @@ test("work_planned with items starts implement; empty items fall back to sequent
   assert.equal(sequential.currentRole, "backend");
 });
 
-test("implementor_done with remaining work items does not skip to reviewer", () => {
+test("implementor_done with remaining work items in the same layer stays on implement", () => {
   const next = applyHandoff(
     run({
       stage: "implement",
@@ -430,6 +554,85 @@ test("implementor_done with remaining work items does not skip to reviewer", () 
   assert.equal(next.stage, "implement");
 });
 
+test("implementor_done reviews a finished layer even when later work items are pending", () => {
+  const next = applyHandoff(
+    run({
+      stage: "implement",
+      implementorQueue: ["database", "backend"],
+      implementorIndex: 0,
+      currentRole: "database",
+      workItems: [
+        {
+          id: "schema",
+          layer: "database",
+          title: "schema",
+          files: ["prisma/**"],
+          dependsOn: [],
+          status: "done",
+          attempts: 1,
+        },
+        {
+          id: "route",
+          layer: "backend",
+          title: "route",
+          files: ["src/server/**"],
+          dependsOn: [],
+          status: "pending",
+          attempts: 0,
+        },
+      ],
+    }),
+    "implementor_done",
+  );
+  assert.equal(next.stage, "reviewer");
+  assert.equal(next.reviewLayer, "database");
+});
+
+test("skip during implement only finishes the current layer then reviews it", () => {
+  const skipped = applySkip(
+    run({
+      stage: "implement",
+      implementorQueue: ["database", "backend"],
+      implementorIndex: 0,
+      currentRole: "database",
+      layersNeeded: ["database", "backend"],
+      workItems: [
+        {
+          id: "schema",
+          layer: "database",
+          title: "schema",
+          files: ["prisma/**"],
+          dependsOn: [],
+          status: "pending",
+          attempts: 0,
+        },
+        {
+          id: "route",
+          layer: "backend",
+          title: "route",
+          files: ["src/server/**"],
+          dependsOn: [],
+          status: "pending",
+          attempts: 0,
+        },
+      ],
+    }),
+  );
+  assert.equal(skipped.stage, "reviewer");
+  assert.equal(skipped.reviewLayer, "database");
+  assert.equal(skipped.workItems?.[0]?.status, "done");
+  assert.equal(skipped.workItems?.[1]?.status, "pending");
+
+  const nextLayer = applySkip(skipped);
+  assert.equal(nextLayer.stage, "implement");
+  assert.equal(nextLayer.currentRole, "backend");
+});
+
+test("skip after the last layer review goes to tester", () => {
+  const next = applySkip(run({ stage: "reviewer", pauseReason: "fix_review_max" }));
+  assert.equal(next.stage, "tester");
+});
+
 test("continue retries failed work items; skip sends them to review", () => {
   const failed = run({
     stage: "implement",
@@ -452,6 +655,7 @@ test("continue retries failed work items; skip sends them to review", () => {
 
   const skipped = applySkip(failed);
   assert.equal(skipped.stage, "reviewer");
+  assert.equal(skipped.reviewLayer, "backend");
 
   const autoRetry = autoResumeGate(failed);
   assert.equal(autoRetry.workItems?.[0]?.status, "pending");

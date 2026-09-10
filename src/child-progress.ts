@@ -4,6 +4,13 @@
  * ("hub", "the", a single path fragment).
  */
 
+import {
+  DEFAULT_BUILD_TOOL_CALLS,
+  DEFAULT_MAX_TOOL_CALLS,
+  MAX_TOOL_CALLS_CAP,
+  SCOUT_MAX_TOOL_CALLS,
+} from "./types.ts";
+
 export type ProgressUpdate = {
   kind: "tool" | "text";
   label: string;
@@ -223,10 +230,28 @@ export function createProgressParser(): {
   };
 }
 
-export function resolveMaxToolCalls(configured?: number): number {
+const BUILD_TOOL_ROLES = new Set([
+  "database",
+  "backend",
+  "frontend",
+  "general",
+  "reviewer",
+  "tester",
+  "linter",
+]);
+
+export function defaultMaxToolCalls(role?: string): number {
+  if (role === "scout") return SCOUT_MAX_TOOL_CALLS;
+  if (role && BUILD_TOOL_ROLES.has(role)) return DEFAULT_BUILD_TOOL_CALLS;
+  return DEFAULT_MAX_TOOL_CALLS;
+}
+
+export function resolveMaxToolCalls(configured?: number, role?: string): number {
+  const fallback = defaultMaxToolCalls(role);
+  const cap = role === "scout" ? SCOUT_MAX_TOOL_CALLS : MAX_TOOL_CALLS_CAP;
   const value = Number(configured);
-  if (!Number.isFinite(value) || value < 1) return 80;
-  return Math.min(Math.floor(value), 400);
+  if (!Number.isFinite(value) || value < 1) return Math.min(fallback, cap);
+  return Math.min(Math.floor(value), cap);
 }
 
 export function resolveChildIdleMs(configured?: number): number {

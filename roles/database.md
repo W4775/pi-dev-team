@@ -16,7 +16,7 @@ Ship schema, migrations, and data-access code that match the stored spec. Do not
 
 ## When you are a subagent on one work item
 
-The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. `implementor_done` completes that item, not the whole pipeline.
+The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. `implementor_done` completes that item, not the whole pipeline. The pipeline reviews this layer before later layers start.
 
 ## Tools
 

@@ -24,7 +24,7 @@ A backend can be several services in several languages. If this pass names one:
 
 ## When you are a subagent on one work item
 
-The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. Append what you did to `backendNotes`. `implementor_done` completes that item, not the whole pipeline.
+The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. Append what you did to `backendNotes`. `implementor_done` completes that item, not the whole pipeline. The pipeline reviews this layer before later layers start.
 
 ## Tools
 

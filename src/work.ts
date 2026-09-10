@@ -145,8 +145,17 @@ export function nextWave(items: WorkItem[] | undefined, maxParallel = DEFAULT_PA
   return [];
 }
 
+export function itemsForLayer(items: WorkItem[] | undefined, layer: ImplementorLayer | undefined): WorkItem[] {
+  if (!layer) return [];
+  return (items ?? []).filter((item) => item.layer === layer);
+}
+
 export function itemsRemaining<T extends { status: WorkItemStatus }>(items: T[] | undefined): T[] {
   return (items ?? []).filter((item) => item.status === "pending" || item.status === "running");
+}
+
+export function layerRemaining(items: WorkItem[] | undefined, layer: ImplementorLayer | undefined): WorkItem[] {
+  return itemsRemaining(itemsForLayer(items, layer));
 }
 
 export function failedItems<T extends { status: WorkItemStatus }>(items: T[] | undefined): T[] {

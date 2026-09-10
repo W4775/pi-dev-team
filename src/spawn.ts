@@ -316,6 +316,8 @@ export function childUserPrompt(
   service?: ServiceInfo,
   services?: ServiceInfo[],
   assignment?: ChildAssignment,
+  maxToolCalls?: number,
+  extras?: { reviewLayer?: string; reviewFiles?: string[] },
 ): string {
   const skillLines = skillDirs
     .filter(Boolean)
@@ -351,19 +353,27 @@ export function childUserPrompt(
           .filter(Boolean)
           .join("\n")
     : "";
+  const review =
+    role === "reviewer" && extras?.reviewLayer
+      ? [
+          `This review is for the ${extras.reviewLayer} layer only. Later layers have not been implemented yet — do not block them for being missing.`,
+          extras.reviewFiles?.length
+            ? `Judge these files / globs:\n${extras.reviewFiles.map((file) => `- ${file}`).join("\n")}`
+            : `Focus on this layer's files. Earlier layers already passed review; only block those files if this layer's work broke them.`,
+        ].join("\n")
+      : "";
   return [
     `You are the ${role.replaceAll("_", " ")} for this /devteam run.`,
     `Task: ${task || "(see devteam_state)"}`,
     serviceBlock(role, service, services),
     assigned,
+    review,
     `First: call devteam_state with action "get". Then read each attached skill's SKILL.md (use the read tool).`,
     skillLines.length ? `Skill files:\n${skillLines.join("\n")}` : "",
     `Follow /skill:<name> together with TDD at agreed seams when you are implementing.`,
     handoff,
     `Do not start /devteam. Do not git commit.`,
-    assignment?.list === "scout"
-      ? `Stay under 40 tool calls. If you cannot finish the map, hand off what you found.`
-      : `Stay under 80 tool calls. If the remaining work does not fit, hand off with what you finished and leave the rest in notes.`,
+    `Stay under ${maxToolCalls ?? (assignment?.list === "scout" ? 40 : 80)} tool calls. If the remaining work does not fit, hand off with what you finished and leave the rest in notes.`,
   ]
     .filter(Boolean)
     .join("\n");

@@ -4,6 +4,7 @@ import {
   adaptArgsForUnknownFlags,
   buildChildCliArgs,
   childProcessEnv,
+  childUserPrompt,
   getPiInvocation,
   hostBinaryName,
   isOmpHost,
@@ -254,6 +255,20 @@ test("childProcessEnv carries service and task id", () => {
   const env = childProcessEnv("backend", "/tmp/run.json", {}, { serviceName: "api", taskId: "route" });
   assert.equal(env.DEVTEAM_SERVICE, "api");
   assert.equal(env.DEVTEAM_TASK, "route");
+});
+
+test("child prompt names the role's tool-call budget", () => {
+  const backend = childUserPrompt("backend", "Add a route", [], undefined, undefined, undefined, 200);
+  assert.match(backend, /Stay under 200 tool calls/);
+  const reviewer = childUserPrompt("reviewer", "Review the diff", [], undefined, undefined, undefined, 200, {
+    reviewLayer: "backend",
+    reviewFiles: ["src/server/**"],
+  });
+  assert.match(reviewer, /Stay under 200 tool calls/);
+  assert.match(reviewer, /backend layer only/);
+  assert.match(reviewer, /src\/server\/\*\*/);
+  const scout = childUserPrompt("scout", "Map the UI", [], undefined, undefined, undefined, 40);
+  assert.match(scout, /Stay under 40 tool calls/);
 });
 
 test("implementor tools include edit and write", () => {

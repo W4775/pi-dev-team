@@ -15,7 +15,7 @@ Cover CLI, scripts, shared libraries, or anything that is not a dedicated databa
 
 ## When you are a subagent on one work item
 
-The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. `implementor_done` completes that item, not the whole pipeline.
+The run prompt names one item and the paths you own. Stay inside those paths — other subagents are editing the rest of the tree. `implementor_done` completes that item, not the whole pipeline. The pipeline reviews this layer before later layers start.
 
 ## Tools
 

@@ -38,8 +38,8 @@ There is no `/devteam ponytail`. If you already run [ponytail](https://github.co
 4. **Plan critic** (isolated) — itemized holes; you accept or reject each one
 5. **Designer + design critic** — only if you stored `wantMockup` during grilling
 6. **Orchestrator** (isolated) — splits the spec into work items with file allowlists
-7. **Implementors** — one layer at a time (database → backend → frontend → general). Items with disjoint files in the same layer run together (default 3, cap 6). If the orchestrator produces no items, the old sequential one-role-per-layer path still runs.
-8. **Reviewer → tester → linter** with a fix-it loop (max 3 rounds each). Blocks vs notes. Fowler smells are notes. Hitting a cap continues to the next QA stage.
+7. **Implementors** — only the layers this change needs (database → backend → frontend → general, skipping any that have no notes, files, or work items). Items with disjoint files in the same layer run together (default 3, cap 6). After each layer, a **reviewer** judges that layer; `qa_fail` sends that layer's implementor back to fix, then review runs again until it passes (max 3 fix rounds). Only then does the next layer start. If the orchestrator produces no items, the sequential path still runs **those needed layers only**, with the same per-layer review loop.
+8. **Tester → linter** after the last layer's review passes, each with its own fix-it loop (max 3 rounds). Blocks vs notes. Fowler smells are notes. Hitting a cap continues to the next QA stage.
 9. **Commit-message** — drafts a conventional message. **Does not commit.**
 
 Planner and designer stay in the current Pi session. Everything else is an isolated `pi` child using the same model. When a role calls `devteam_handoff`, the next role starts immediately.
@@ -68,17 +68,18 @@ flowchart TD
     DesignCritic -->|"critic_revise · max 2 rounds"| Designer
     DesignCritic -->|critic_approve| Orchestrator
 
-    Orchestrator["Orchestrator · child<br/>writes workItems"] -->|work_planned| Implement["Implement · waves of subagents"]
-    Orchestrator -.->|"no work items"| Sequential["Fallback · one implementor per layer"]
-    Sequential --> Reviewer
+    Orchestrator["Orchestrator · child<br/>writes workItems"] -->|work_planned| Implement["Implement · one layer"]
+    Orchestrator -.->|"no work items"| Sequential["Fallback · needed layers only"]
+    Sequential --> Implement
 
-    Implement -->|all items done| Reviewer["Reviewer · child"]
-    Implement -->|item failed| Retry["Retry once, then review"]
+    Implement --> Reviewer["Reviewer · that layer · child"]
+    Implement -->|item failed| Retry["Retry once, then review this layer"]
     Retry --> Reviewer
 
-    Reviewer -->|qa_fail| FixReview["fix_review · implementors, sequential"]
+    Reviewer -->|qa_fail| FixReview["fix_review · this layer"]
     FixReview --> Reviewer
-    Reviewer -->|qa_pass / fix cap| Tester["Tester · child"]
+    Reviewer -->|qa_pass and more layers| Implement
+    Reviewer -->|qa_pass last layer / skip / cap| Tester["Tester · child"]
 
     Tester -->|qa_fail| FixTest["fix_test"]
     FixTest --> Tester
@@ -91,7 +92,7 @@ flowchart TD
     Commit -->|commit_drafted| Done["Draft commit message · nothing is committed"]
 ```
 
-Each fix loop is capped at 3 rounds. Hitting a cap continues to the next QA stage.
+Each implementor-layer review and each tester/linter fix loop is capped at 3 rounds. Hitting a cap continues to the next layer (or the next QA stage).
 
 ### Inside the implement stage
 
@@ -120,10 +121,13 @@ flowchart LR
         g1["seed script<br/>scripts/**"]
     end
 
-    DB --> BE --> FE --> GEN --> Review["Reviewer"]
+    DB --> ReviewDB["Reviewer · database"] --> BE
+    BE --> ReviewBE["Reviewer · backend"] --> FE
+    FE --> ReviewFE["Reviewer · frontend"] --> GEN
+    GEN --> ReviewGEN["Reviewer · general"]
 ```
 
-`b1` and `b2` run together, as do `f1`, `f2` and `f3`, because no two of them claim the same paths. An item that lists overlapping paths waits for the next wave, and an item that lists no paths runs alone.
+`b1` and `b2` run together, as do `f1`, `f2` and `f3`, because no two of them claim the same paths. An item that lists overlapping paths waits for the next wave, and an item that lists no paths runs alone. The reviewer for a layer must pass (or hit the fix cap) before the next layer starts. The orchestrator finishes before any implementor starts; implementors never overlap with it.
 
 Run state lives under the Pi **agent** directory, not the plugin install folder and not your repo. There is no `workflow_state` file inside `~/.omp/plugins/` (or wherever omp copies this package).
 
@@ -177,7 +181,7 @@ Cap is **3** stack skills per child.
     { "name": "api", "root": "services/api", "layer": "backend", "test": ["go test ./..."] },
     { "name": "scoring", "root": "services/scoring", "layer": "backend", "test": ["pytest"] }
   ],
-  "maxToolCalls": 80,
+  "maxToolCalls": 200,
   "parallel": 3,
   "childIdle": 480,
   "repeatToolAbort": 8
@@ -196,9 +200,9 @@ The tester and linter then run each service's own command from that service's di
 
 ### Isolated child progress
 
-The widget above the editor is one line: **step · role · elapsed** (`implement · backend · 1:23`). Each child action is appended to the **session transcript** as it happens (`Starting backend`, `backend  edit src/api.ts`, `backend  write src/routes.ts`, then `backend finished in 1:23 · 14 tool calls`), so you can scroll the same kind of stack you get from a normal agent turn. The working loader and footer stay empty so that stack is not duplicated. Optional `progressEvery` toasts are off unless you set them in `devteam.json`. Streamed one-word tokens such as `hub` are ignored; only a tool call or a full sentence is logged. Child **stdout is kept in full** — it is the workflow's memory, not a log to trim.
+The widget above the editor is one line: **step · role · elapsed** (`implement · backend · 1:23`). Child work is one **session transcript** block per role, updated in place (`plan critic · 0:12 · 4 tools` with the current actions underneath). Parallel scouts share a scout block; a later critic pass is a new block so it stays below the planner. The working loader and footer stay empty so that stack is not duplicated. Optional `progressEvery` toasts are off unless you set them in `devteam.json`. Streamed one-word tokens such as `hub` are ignored; only a tool call or a full sentence is logged. Child **stdout is kept in full** — it is the workflow's memory, not a log to trim.
 
-A child that hits `maxToolCalls` (80 by default) is aborted instead of looping for thousands of calls. A child that produces no output for `childIdle` seconds (8 minutes by default) is aborted. A child that repeats the same tool label `repeatToolAbort` times in a row (8 by default) is aborted. Oh My Pi JSON mode streams `thinking_delta` / `text_delta` tokens and `tool_stream_update` / `tool_execution_update` chunks; those are not counted as new tool calls. `/devteam stop` stops the current step; `/devteam continue` resumes it; `/devteam skip` skips it.
+A child that hits `maxToolCalls` is aborted instead of looping for thousands of calls. Defaults are **200** for implementors, reviewer, tester, and linter; **40** for scouts; **80** for the other specialists. A project `maxToolCalls` overrides those defaults (scouts still cap at 40). A child that produces no output for `childIdle` seconds (8 minutes by default) is aborted. A child that repeats the same tool label `repeatToolAbort` times in a row (8 by default) is aborted. Oh My Pi JSON mode streams `thinking_delta` / `text_delta` tokens and `tool_stream_update` / `tool_execution_update` chunks; those are not counted as new tool calls. `/devteam stop` stops the current step; `/devteam continue` resumes it; `/devteam skip` skips it.
 
 If a specialist exits cleanly without calling `devteam_handoff`, the parent infers the action from run state (critic notes, stored work items, findings, and so on) so the pipeline does not stall.
 

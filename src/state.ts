@@ -468,6 +468,7 @@ export function renderRunMarkdown(
   }
   if (run.gitBaseline) lines.push(`- **Git baseline:** ${run.gitBaseline}${run.dirtyAtStart ? " (dirty tree at start)" : ""}`);
   if (run.layersNeeded?.length) lines.push(`- **Layers needed:** ${run.layersNeeded.join(", ")}`);
+  if (run.reviewLayer) lines.push(`- **Review layer:** ${run.reviewLayer}`);
   if (run.currentService) lines.push(`- **Current service:** ${run.currentService}`);
   if (run.stack?.services?.length) lines.push(``, `## Services`, ``, renderServices(run.stack.services));
   if (run.scoutItems?.length) lines.push(``, `## Scout items`, ``, renderScoutItems(run.scoutItems));

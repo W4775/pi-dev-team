@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   applyServiceDefaults,
+  itemsForLayer,
+  layerRemaining,
   nextWave,
   normalizeWorkItems,
   resolveParallel,
@@ -141,6 +143,19 @@ test("resolveParallel defaults to 3 and caps at 6", () => {
   assert.equal(resolveParallel(undefined), 3);
   assert.equal(resolveParallel(0), 3);
   assert.equal(resolveParallel(9), 6);
+});
+
+test("layerRemaining only counts unfinished items in that layer", () => {
+  const items = [
+    item({ id: "db", layer: "database", title: "schema", files: ["prisma/**"], status: "done" }),
+    item({ id: "api", layer: "backend", title: "route", files: ["src/server/**"] }),
+  ];
+  assert.deepEqual(
+    itemsForLayer(items, "backend").map((entry) => entry.id),
+    ["api"],
+  );
+  assert.equal(layerRemaining(items, "database").length, 0);
+  assert.equal(layerRemaining(items, "backend").length, 1);
 });
 
 test("retryableItems stops after two attempts", () => {

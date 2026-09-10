@@ -37,11 +37,16 @@ test("activity line names the last useful action and the call count", () => {
   assert.equal(line.includes(" · hub"), false);
 });
 
-test("tool-call budget defaults to 80 and clamps", () => {
+test("tool-call budget is higher for implementors and the reviewer", () => {
   assert.equal(resolveMaxToolCalls(undefined), 80);
-  assert.equal(resolveMaxToolCalls(0), 80);
-  assert.equal(resolveMaxToolCalls(12), 12);
-  assert.equal(resolveMaxToolCalls(9999), 400);
+  assert.equal(resolveMaxToolCalls(undefined, "plan_critic"), 80);
+  assert.equal(resolveMaxToolCalls(undefined, "backend"), 200);
+  assert.equal(resolveMaxToolCalls(undefined, "reviewer"), 200);
+  assert.equal(resolveMaxToolCalls(undefined, "scout"), 40);
+  assert.equal(resolveMaxToolCalls(0, "backend"), 200);
+  assert.equal(resolveMaxToolCalls(12, "backend"), 12);
+  assert.equal(resolveMaxToolCalls(9999, "reviewer"), 400);
+  assert.equal(resolveMaxToolCalls(9999, "scout"), 40);
 });
 
 test("idle timeout defaults to 8 minutes and can be disabled", () => {

@@ -32,6 +32,7 @@ import { captureGit } from "./git.ts";
 import { isolatedRoleFromFlag, gateBash, gateWrite, isWriteTool } from "./permissions.ts";
 import {
   acceptMockupChoice,
+  activeImplementLayer,
   activeRole,
   applyContinue,
   applyCritiqueDecisions,
@@ -41,6 +42,7 @@ import {
   attachRunForResume,
   autoResumeGate,
   continueHint,
+  enterLayerReview,
   goToStage,
   inferHandoffAction,
   needsIsolatedChild,
@@ -48,6 +50,7 @@ import {
   needsUserReview,
   parseYesNo,
   proceedAfterPlan,
+  reviewScope,
   stackLayerForRole,
   startScouting,
   startSequentialImplementation,
@@ -89,9 +92,10 @@ import type {
 } from "./types.ts";
 import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS } from "./types.ts";
 import {
-  failedItems,
   findItem,
+  itemsForLayer,
   itemsRemaining,
+  layerRemaining,
   nextWave,
   retryableItems,
   setItemStatus,
@@ -412,7 +416,7 @@ export default function (pi: ExtensionAPI) {
     const streaming = typeof (ctx as { isIdle?: () => boolean }).isIdle === "function"
       ? !(ctx as { isIdle: () => boolean }).isIdle()
       : false;
-    const posted = postSessionLine(pi, event, { streaming });
+    const posted = postSessionLine(pi, event, { streaming, sessionManager: ctx.sessionManager });
     if (toast === "error" || toast === "warning" || posted === "none") {
       notify(ctx, event.text, toast ?? "info");
     }
@@ -561,7 +565,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           "Start the /devteam planner for this task.",
           "Grill until the spec is complete. Persist every decision with devteam_state.",
           "Scout notes are facts about this repo. Do not re-ask the user things they already answer. Name real files and types from those notes.",
-          "Infer layersNeeded (database, backend, frontend, general) and uiSurface.",
+          "Infer layersNeeded for THIS change only (database, backend, frontend, general) — omit layers with no work. Write a short briefing into that layer's notes; leave the others blank so those implementors are skipped. Also store uiSurface.",
           "If the user already said whether they want HTML mockups, store wantMockup.",
           "When the spec is ready, call devteam_handoff with action plan_ready.",
           `Task:\n${run.task}`,
@@ -640,6 +644,9 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       );
     }
 
+    const budget = resolveMaxToolCalls(config?.maxToolCalls, role);
+    const repeatLimit = resolveRepeatToolAbort(config?.repeatToolAbort);
+    const scope = role === "reviewer" ? reviewScope(latest) : undefined;
     let args = buildChildCliArgs({
       extensionPath: thisExtensionEntry(),
       rolePromptFile: promptFile,
@@ -652,12 +659,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       trusted: projectTrusted(ctx),
       serviceName: service?.name,
       taskId: assignment?.id,
-      prompt: childUserPrompt(role, latest.task, dirs, service, services, assignment),
+      prompt: childUserPrompt(role, latest.task, dirs, service, services, assignment, budget, scope),
     });
-
-    const budget =
-      role === "scout" ? Math.min(resolveMaxToolCalls(config?.maxToolCalls), 40) : resolveMaxToolCalls(config?.maxToolCalls);
-    const repeatLimit = resolveRepeatToolAbort(config?.repeatToolAbort);
     const activityKey = assignment?.id ?? role;
     const activity: ChildActivity = {
       role: assignment ? `${role}/${assignment.id}` : service ? `${role}/${service.name}` : role,
@@ -880,8 +883,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       for (;;) {
         const current = store.load() ?? run;
         if (current.halted) return;
-        if (!itemsRemaining(current.workItems).length) {
-          const retry = retryableItems(current.workItems);
+        if (current.stage !== "implement") return;
+
+        const layer = activeImplementLayer(current) ?? "general";
+        if (!layerRemaining(current.workItems, layer).length) {
+          const retry = retryableItems(itemsForLayer(current.workItems, layer));
           if (retry.length) {
             const ids = new Set(retry.map((item) => item.id));
             run = persist({
@@ -893,19 +899,21 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             });
             continue;
           }
-          persist(goToStage(current, "reviewer", { currentRole: "reviewer" }));
+          persist(enterLayerReview(current, layer));
           return;
         }
+
         const wave = nextWave(current.workItems, config?.parallel);
-        if (!wave.length) {
+        if (!wave.length || wave[0]?.layer !== layer) {
           persist(
-            goToStage(
+            enterLayerReview(
               {
                 ...current,
-                lastError: current.lastError ?? "Work items were blocked; continuing to review.",
+                lastError: wave.length
+                  ? undefined
+                  : (current.lastError ?? "Work items were blocked; continuing to review this layer."),
               },
-              "reviewer",
-              { currentRole: "reviewer" },
+              layer,
             ),
           );
           return;

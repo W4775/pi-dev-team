@@ -184,6 +184,8 @@ export type RunState = {
   interactiveRole?: InteractiveRole;
   implementorQueue: ImplementorLayer[];
   implementorIndex: number;
+  /** Layer currently under review (or being fixed after that review). */
+  reviewLayer?: ImplementorLayer;
   /** Remaining services for the current implementor layer, when the repo is polyglot. */
   serviceQueue: string[];
   serviceIndex: number;
@@ -279,7 +281,7 @@ export type ProjectConfig = {
     test?: string[];
     lint?: string[];
   };
-  /** Abort a child after this many tool calls. 0 uses the default (80). */
+  /** Abort a child after this many tool calls. 0 uses the role default (200 for implementors/reviewer, 40 for scouts, 80 otherwise). */
   maxToolCalls?: number;
   /** Seconds between optional progress toasts. 0 (default) turns them off; live work goes to the working line. */
   progressEvery?: number;
@@ -314,6 +316,9 @@ export const MAX_FIX_ROUNDS = 3;
 export const MAX_DESIGN_REJECTS = 2;
 export const MAX_SERVICES = 12;
 export const DEFAULT_MAX_TOOL_CALLS = 80;
+/** Implementors, reviewer, tester, and linter need room to read, edit, and re-check. */
+export const DEFAULT_BUILD_TOOL_CALLS = 200;
+export const SCOUT_MAX_TOOL_CALLS = 40;
 export const MAX_TOOL_CALLS_CAP = 400;
 export const DEFAULT_PROGRESS_EVERY_MS = 0;
 export const DEFAULT_PARALLEL = 3;

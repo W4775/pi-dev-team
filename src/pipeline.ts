@@ -1,6 +1,14 @@
 import { hasBlockFindings, layerFromFile } from "./state.ts";
 import { serviceQueueForLayer, servicesForFiles } from "./services.ts";
-import { applyServiceDefaults, failedItems, itemsRemaining, layersFromItems, retryableItems } from "./work.ts";
+import {
+  applyServiceDefaults,
+  failedItems,
+  itemsForLayer,
+  itemsRemaining,
+  layerRemaining,
+  layersFromItems,
+  retryableItems,
+} from "./work.ts";
 import { compileScoutNotes, retryableScouts } from "./scout.ts";
 import { formatCritiqueForPlanner, parseCritiqueItems, rejectUndecided } from "./critique.ts";
 import type {
@@ -19,18 +27,79 @@ import { IMPLEMENTOR_LAYERS, MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS } from "./types.
 
 const LAYER_SET = new Set<string>(IMPLEMENTOR_LAYERS);
 
-export function parseLayers(layersNeeded: string[] | undefined): ImplementorLayer[] {
-  const requested = (layersNeeded ?? [])
-    .map((item) => item.trim().toLowerCase())
-    .filter((item): item is ImplementorLayer => LAYER_SET.has(item));
-  const unique = IMPLEMENTOR_LAYERS.filter((layer) => requested.includes(layer));
-  return unique.length > 0 ? [...unique] : ["general"];
-}
-
 export function layersListed(layersNeeded: string[] | undefined): ImplementorLayer[] {
   return (layersNeeded ?? [])
     .map((item) => item.trim().toLowerCase())
     .filter((item): item is ImplementorLayer => LAYER_SET.has(item));
+}
+
+function orderedLayers(present: Iterable<ImplementorLayer>): ImplementorLayer[] {
+  const set = new Set(present);
+  return IMPLEMENTOR_LAYERS.filter((layer) => set.has(layer));
+}
+
+function layerNote(
+  run: Pick<RunState, "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes">,
+  layer: ImplementorLayer,
+): string | undefined {
+  if (layer === "database") return run.databaseNotes;
+  if (layer === "backend") return run.backendNotes;
+  if (layer === "frontend") return run.frontendNotes;
+  return run.generalNotes;
+}
+
+function layersFromFiles(files: RunState["filesToChange"]): ImplementorLayer[] {
+  return IMPLEMENTOR_LAYERS.filter((layer) => (files?.[layer] ?? []).length > 0);
+}
+
+function layersFromNotes(
+  run: Pick<RunState, "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes">,
+): ImplementorLayer[] {
+  return IMPLEMENTOR_LAYERS.filter((layer) => Boolean(layerNote(run, layer)?.trim()));
+}
+
+/**
+ * Layers this change actually needs. Empty notes/files for a layer mean skip
+ * that implementor, even if the repo has that stack.
+ */
+export function implementorAllowList(
+  run: Pick<RunState, "layersNeeded" | "filesToChange" | "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes">,
+): ImplementorLayer[] {
+  const listed = layersListed(run.layersNeeded);
+  const fromNotes = layersFromNotes(run);
+  const fromFiles = layersFromFiles(run.filesToChange);
+  const briefed = orderedLayers([...fromNotes, ...fromFiles]);
+  if (briefed.length && listed.length) {
+    const both = orderedLayers(briefed.filter((layer) => listed.includes(layer)));
+    return both.length ? both : briefed;
+  }
+  if (briefed.length) return briefed;
+  return orderedLayers(listed);
+}
+
+/** Queue of implementors to spawn. Falls back to general only when nothing was specified. */
+export function neededImplementors(
+  run: Pick<
+    RunState,
+    "workItems" | "layersNeeded" | "filesToChange" | "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes"
+  >,
+): ImplementorLayer[] {
+  const fromItems = layersFromItems(run.workItems);
+  const allow = implementorAllowList(run);
+  if (fromItems.length) {
+    if (allow.length) {
+      const clipped = orderedLayers(fromItems.filter((layer) => allow.includes(layer)));
+      return clipped.length ? clipped : fromItems;
+    }
+    return fromItems;
+  }
+  if (allow.length) return allow;
+  return ["general"];
+}
+
+export function parseLayers(layersNeeded: string[] | undefined): ImplementorLayer[] {
+  const requested = orderedLayers(layersListed(layersNeeded));
+  return requested.length > 0 ? requested : ["general"];
 }
 
 export function uiSurfaceOf(run: Pick<RunState, "uiSurface" | "stack">): UiSurface {
@@ -85,6 +154,16 @@ export function autoResumeGate(run: RunState): RunState {
   }
   if (run.stage === "implement" && failedItems(run.workItems).length && !itemsRemaining(run.workItems).length) {
     return retryableItems(run.workItems).length ? applyContinue(run) : applySkip(run);
+  }
+  if (run.stage === "implement") {
+    const layer = activeImplementLayer(run);
+    if (
+      layer &&
+      failedItems(itemsForLayer(run.workItems, layer)).length &&
+      !layerRemaining(run.workItems, layer).length
+    ) {
+      return retryableItems(itemsForLayer(run.workItems, layer)).length ? applyContinue(run) : applySkip(run);
+    }
   }
   return run;
 }
@@ -173,8 +252,9 @@ export function applySkip(run: RunState): RunState {
     return startSequentialImplementation(current);
   }
 
-  if (current.stage === "implement" && (failedItems(current.workItems).length || itemsRemaining(current.workItems).length)) {
-    return goToStage(stamp(current, { workItems: current.workItems }), "reviewer", { currentRole: "reviewer" });
+  if (current.stage === "implement") {
+    const layer = activeImplementLayer(current) ?? "general";
+    return enterLayerReview(stamp(current, { workItems: markLayerSkipped(current.workItems, layer) }), layer);
   }
 
   if (
@@ -182,7 +262,7 @@ export function applySkip(run: RunState): RunState {
     current.stage === "fix_review" ||
     current.pauseReason === "fix_review_max"
   ) {
-    return goToStage(stamp(current, { pauseReason: undefined }), "tester");
+    return afterLayerReviewPass(stamp(current, { pauseReason: undefined }));
   }
 
   if (current.stage === "tester" || current.stage === "fix_test" || current.pauseReason === "fix_test_max") {
@@ -205,6 +285,87 @@ function withLayerServices(run: RunState, layer: ImplementorLayer | undefined): 
   };
 }
 
+function isImplementorLayer(role: RoleName | undefined): role is ImplementorLayer {
+  return role === "database" || role === "backend" || role === "frontend" || role === "general";
+}
+
+/** Layer this implement/review/fix step is for. */
+export function activeImplementLayer(run: RunState): ImplementorLayer | undefined {
+  if (run.reviewLayer) return run.reviewLayer;
+  const queued = run.implementorQueue[run.implementorIndex];
+  if (queued) return queued;
+  if (isImplementorLayer(run.currentRole)) return run.currentRole;
+  return layersFromItems(run.workItems)[0];
+}
+
+export function filesForLayer(run: RunState, layer: ImplementorLayer | undefined): string[] {
+  if (!layer) return [];
+  const fromItems = itemsForLayer(run.workItems, layer).flatMap((item) => item.files);
+  const unique = [...new Set(fromItems.filter(Boolean))];
+  if (unique.length) return unique;
+  return run.filesToChange?.[layer] ?? [];
+}
+
+export function reviewScope(run: RunState): { reviewLayer?: ImplementorLayer; reviewFiles: string[] } {
+  const layer = run.reviewLayer ?? activeImplementLayer(run);
+  return { reviewLayer: layer, reviewFiles: filesForLayer(run, layer) };
+}
+
+function markLayerSkipped(items: RunState["workItems"], layer: ImplementorLayer): RunState["workItems"] {
+  if (!items?.length) return items;
+  return items.map((item) =>
+    item.layer === layer && (item.status === "pending" || item.status === "running")
+      ? { ...item, status: "done" as const, summary: item.summary ?? "skipped by user" }
+      : item,
+  );
+}
+
+/** After a layer finishes implementing, review that layer before later layers start. */
+export function enterLayerReview(run: RunState, layer: ImplementorLayer): RunState {
+  return goToStage(
+    stamp(run, {
+      reviewFindings: undefined,
+      lastError: undefined,
+    }),
+    "reviewer",
+    {
+      currentRole: "reviewer",
+      reviewLayer: layer,
+      fixRound: { ...run.fixRound, review: 0 },
+    },
+  );
+}
+
+/** After this layer's review passes (or is skipped/capped), implement the next layer or start tester. */
+export function afterLayerReviewPass(run: RunState): RunState {
+  const queue = neededImplementors(run);
+  const current = run.reviewLayer ?? activeImplementLayer(run);
+  const idx = current ? queue.indexOf(current) : -1;
+  const nextLayer = idx >= 0 ? queue[idx + 1] : queue[run.implementorIndex + 1];
+  if (nextLayer) {
+    const nextIndex = Math.max(0, queue.indexOf(nextLayer));
+    return goToStage(
+      stamp(run, {
+        reviewFindings: undefined,
+        lastError: undefined,
+        pauseReason: undefined,
+      }),
+      "implement",
+      {
+        implementorQueue: queue,
+        implementorIndex: nextIndex,
+        currentRole: nextLayer,
+        reviewLayer: undefined,
+        fixRound: { ...run.fixRound, review: 0 },
+        ...withLayerServices(run, nextLayer),
+      },
+    );
+  }
+  return goToStage(stamp(run, { pauseReason: undefined, reviewLayer: undefined }), "tester", {
+    currentRole: "tester",
+  });
+}
+
 export function startScouting(run: RunState): RunState {
   return goToStage(run, "scout_orchestrate", {
     currentRole: "planner_orchestrator",
@@ -213,7 +374,7 @@ export function startScouting(run: RunState): RunState {
 }
 
 export function startImplementation(run: RunState): RunState {
-  const queue = parseLayers(run.layersNeeded);
+  const queue = neededImplementors(run);
   return goToStage(run, "orchestrate", {
     implementorQueue: queue,
     implementorIndex: 0,
@@ -223,7 +384,7 @@ export function startImplementation(run: RunState): RunState {
 }
 
 export function startSequentialImplementation(run: RunState): RunState {
-  const queue = parseLayers(run.layersNeeded);
+  const queue = neededImplementors({ ...run, workItems: undefined });
   return goToStage(run, "implement", {
     implementorQueue: queue,
     implementorIndex: 0,
@@ -281,8 +442,8 @@ export function continueHint(run: RunState): string {
   }
   if (run.stage === "implement" && failedItems(run.workItems).length) {
     return retryableItems(run.workItems).length
-      ? "A work item failed. /devteam continue retries it; /devteam skip sends remaining work to the reviewer."
-      : "Work items failed twice. /devteam continue or /devteam skip sends the rest to the reviewer.";
+      ? "A work item failed. /devteam continue retries it; /devteam skip sends remaining work in this layer to the reviewer."
+      : "Work items failed twice. /devteam continue or /devteam skip sends this layer to the reviewer.";
   }
   if (run.stage === "planner" && !run.spec?.trim()) {
     return "Planner is still in this chat. Answer with the ask picker until a spec is stored, then it will hand off to the plan critic.";
@@ -335,7 +496,8 @@ export function applyContinue(run: RunState): RunState {
   }
 
   if (current.stage === "implement") {
-    const retry = retryableItems(current.workItems);
+    const layer = activeImplementLayer(current);
+    const retry = retryableItems(layer ? itemsForLayer(current.workItems, layer) : current.workItems);
     if (retry.length) {
       const ids = new Set(retry.map((item) => item.id));
       return stamp(current, {
@@ -346,13 +508,16 @@ export function applyContinue(run: RunState): RunState {
         ),
       });
     }
+    if (layer && failedItems(itemsForLayer(current.workItems, layer)).length) {
+      return enterLayerReview(current, layer);
+    }
     if (failedItems(current.workItems).length) {
-      return goToStage(current, "reviewer", { currentRole: "reviewer" });
+      return enterLayerReview(current, layer ?? "general");
     }
   }
 
   if (current.pauseReason === "fix_review_max") {
-    return goToStage(stamp(current, { pauseReason: undefined }), "tester");
+    return afterLayerReviewPass(stamp(current, { pauseReason: undefined }));
   }
   if (current.pauseReason === "fix_test_max") {
     return goToStage(stamp(current, { pauseReason: undefined }), "linter");
@@ -443,7 +608,8 @@ function startFix(
   files: string[],
   globs?: ProjectConfig["paths"],
 ): RunState {
-  const queue = mapBlockedFilesToImplementors(files, run, globs);
+  const mapped = mapBlockedFilesToImplementors(files, run, globs);
+  const queue = kind === "review" && run.reviewLayer ? [run.reviewLayer] : mapped;
   const layer = queue[0];
   const serviceQueue =
     layer && files.length
@@ -453,6 +619,7 @@ function startFix(
     implementorQueue: queue,
     implementorIndex: 0,
     currentRole: queue[0],
+    reviewLayer: kind === "review" ? (run.reviewLayer ?? layer) : run.reviewLayer,
     fixRound: { ...run.fixRound, [kind]: run.fixRound[kind] + 1 },
     pauseReason: undefined,
     serviceQueue,
@@ -551,14 +718,14 @@ export function applyHandoff(
     }
 
     case "work_planned": {
-      const withServices = stamp(cleared, {
-        workItems: applyServiceDefaults(cleared.workItems ?? [], cleared.stack?.services),
-      });
+      const allow = implementorAllowList(cleared);
+      const prepared = applyServiceDefaults(cleared.workItems ?? [], cleared.stack?.services);
+      const workItems = allow.length ? prepared.filter((item) => allow.includes(item.layer)) : prepared;
+      const withServices = stamp(cleared, { workItems });
       if (!withServices.workItems?.length) {
         return startSequentialImplementation(withServices);
       }
-      const layers = layersFromItems(withServices.workItems);
-      const queue = layers.length ? layers : parseLayers(withServices.layersNeeded);
+      const queue = neededImplementors(withServices);
       return goToStage(withServices, "implement", {
         implementorQueue: queue,
         implementorIndex: 0,
@@ -567,23 +734,28 @@ export function applyHandoff(
     }
 
     case "implementor_done": {
-      if ((cleared.workItems?.length ?? 0) > 0) {
-        if (itemsRemaining(cleared.workItems).length || failedItems(cleared.workItems).length) {
+      if (cleared.stage === "implement" && (cleared.workItems?.length ?? 0) > 0) {
+        const layer = activeImplementLayer(cleared) ?? "general";
+        if (layerRemaining(cleared.workItems, layer).length) {
           return stamp(cleared, { pipelineLocked: false });
         }
-        return goToStage(cleared, "reviewer", { currentRole: "reviewer" });
+        if (retryableItems(itemsForLayer(cleared.workItems, layer)).length) {
+          return stamp(cleared, { pipelineLocked: false });
+        }
+        return enterLayerReview(cleared, layer);
       }
       const more = nextService(cleared);
       if (more) return more;
       if (cleared.stage === "fix_review") return advanceQueue(cleared, "reviewer");
       if (cleared.stage === "fix_test") return advanceQueue(cleared, "tester");
       if (cleared.stage === "fix_lint") return advanceQueue(cleared, "linter");
-      return advanceQueue(cleared, "reviewer");
+      const layer = activeImplementLayer(cleared) ?? "general";
+      return enterLayerReview(cleared, layer);
     }
 
     case "qa_pass":
       if (cleared.stage === "reviewer" || cleared.stage === "fix_review") {
-        return goToStage(cleared, "tester", { currentRole: "tester" });
+        return afterLayerReviewPass(cleared);
       }
       if (cleared.stage === "tester" || cleared.stage === "fix_test") {
         return goToStage(cleared, "linter", { currentRole: "linter" });
@@ -593,7 +765,7 @@ export function applyHandoff(
     case "qa_fail": {
       if (cleared.stage === "reviewer" || cleared.stage === "fix_review") {
         if (!canFix(cleared, "review")) {
-          return goToStage(stamp(cleared, { pauseReason: undefined }), "tester", { currentRole: "tester" });
+          return afterLayerReviewPass(stamp(cleared, { pauseReason: undefined }));
         }
         return startFix(cleared, "fix_review", "review", filesFromFindings(cleared.reviewFindings), globs);
       }
