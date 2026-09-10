@@ -9,6 +9,7 @@ import {
   resetProgressFeed,
   roleLabel,
   stageLabel,
+  tickProgressFeed,
   toolLogText,
   widgetLine,
 } from "../src/ui-progress.ts";
@@ -217,6 +218,21 @@ test("updates the persisted custom_message so a transcript rebuild keeps the sta
     { sessionManager },
   );
   assert.match(entry.content, /backend {2}edit src\/api\.ts/);
+});
+
+test("running progress block elapsed ticks without a new tool event", () => {
+  resetProgressFeed();
+  const now = 1_000_000;
+  const messages: Array<{ content: string }> = [];
+  const pi = {
+    sendMessage: (message: { content: string }) => {
+      messages.push(message);
+    },
+  };
+  postSessionLine(pi, { kind: "start", text: "Starting frontend", role: "frontend" }, { now });
+  assert.match(messages[0]?.content ?? "", /frontend · 0:00/);
+  tickProgressFeed({ now: now + 45_000 });
+  assert.match(messages[0]?.content ?? "", /frontend · 0:45/);
 });
 
 test("without sendMessage, appendEntry still records the stack", () => {

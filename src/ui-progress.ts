@@ -266,7 +266,7 @@ function applyProgressEvent(block: ProgressBlock, event: ProgressEvent, now: num
     if (block.activeCount === 0) block.activeCount = 1;
     block.status = "running";
     const line = (event.text || event.label || "").trim();
-    if (line) block.lines.push(line);
+    if (line && block.lines[block.lines.length - 1] !== line) block.lines.push(line);
     if (event.kind === "tool") block.toolCalls += 1;
     return;
   }
@@ -336,6 +336,15 @@ function paintPosted(block: ProgressBlock, text: string, sessionManager?: unknow
     }
   }
   patchSessionEntries(sessionManager, block.id, text);
+}
+
+/** Refresh elapsed time on running transcript blocks while a child is quiet. */
+export function tickProgressFeed(opts?: { now?: number; sessionManager?: unknown }): void {
+  const now = opts?.now ?? Date.now();
+  for (const block of blocksById.values()) {
+    if (block.status !== "running" || block.activeCount <= 0) continue;
+    paintPosted(block, formatProgressBlock(block, now), opts?.sessionManager);
+  }
 }
 
 export function registerDevteamRenderers(pi: unknown): void {

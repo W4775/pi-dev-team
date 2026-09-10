@@ -101,7 +101,7 @@ import {
   setItemStatus,
 } from "./work.ts";
 import { compileScoutNotes, findScout, nextScoutWave, setScoutStatus } from "./scout.ts";
-import { applyChrome, clearChrome, lifecycleText, postSessionLine, registerDevteamRenderers, toolLogText } from "./ui-progress.ts";
+import { applyChrome, clearChrome, lifecycleText, postSessionLine, registerDevteamRenderers, tickProgressFeed, toolLogText } from "./ui-progress.ts";
 import { formatAskAnswers, promptQuestions, type AskQuestion } from "./ask-ui.ts";
 import { parseCritiqueItems } from "./critique.ts";
 
@@ -289,6 +289,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
       refreshUi(ctx, store.load());
+      tickProgressFeed({ sessionManager: ctx.sessionManager });
       reportProgress(ctx);
     }, 2000);
     progressTimer.unref?.();
@@ -704,7 +705,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               return;
             }
           }
-          const shouldPost = Boolean(update.label && update.label !== activity.label);
+          const shouldPost = update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
           activity.label = update.label;
           activity.lastEventAt = Date.now();
           if (shouldPost) {

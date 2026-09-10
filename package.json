@@ -1,6 +1,6 @@
 {
   "name": "pi-dev-team",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Pi extension: /devteam runs a planner, optional designer, and specialized implementors with official stack skills.",
   "keywords": ["pi-package"],
   "repository": {

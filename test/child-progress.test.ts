@@ -243,3 +243,28 @@ test("eight start events with no path do not abort as identical reads", () => {
   assert.equal(tools.every((update) => update.label === "read"), true);
   assert.equal(isRepeatedToolLoop(tools.map((update) => update.label), 8), false);
 });
+
+test("a shared envelope id does not drop later tool calls", () => {
+  const parser = createProgressParser();
+  const lines = Array.from({ length: 5 }, (_, i) => ({
+    type: "tool_execution_start",
+    id: "session-envelope",
+    toolCallId: `call_${i}`,
+    toolName: "read",
+    args: { path: `src/app/file-${i}.tsx` },
+  }));
+  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  assert.equal(tools.length, 5);
+});
+
+test("toolcall_start then execution_start is one call and keeps the path", () => {
+  const parser = createProgressParser();
+  const updates = parser.push(
+    `${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", id: "call_1", toolName: "read" } })}\n${JSON.stringify({ type: "tool_execution_start", toolCallId: "call_1", toolName: "read", args: { path: "src/app/hub.tsx" } })}\n`,
+  );
+  const tools = updates.filter((update) => update.kind === "tool");
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0]?.label, "read");
+  const labels = updates.map((update) => update.label);
+  assert.equal(labels.includes("read src/app/hub.tsx"), true);
+});

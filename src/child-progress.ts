@@ -22,6 +22,7 @@ const MUTATING_TOOL_PREFIX = /^(edit|write|bash|handoff|mockup)\b/i;
 
 const TOOL_EVENT_TYPES = new Set([
   "tool",
+  "toolCall",
   "tool_call",
   "tool-call",
   "tool_use",
@@ -57,7 +58,7 @@ function firstNumber(source: Record<string, unknown> | undefined, keys: string[]
 
 function toolArgs(node: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!node) return undefined;
-  const direct = node.input ?? node.args ?? node.parameters;
+  const direct = node.input ?? node.args ?? node.parameters ?? node.arguments;
   if (direct && typeof direct === "object" && !Array.isArray(direct)) {
     return direct as Record<string, unknown>;
   }
@@ -72,8 +73,25 @@ function toolArgs(node: Record<string, unknown> | undefined): Record<string, unk
   return undefined;
 }
 
-function toolCallIdOf(node: Record<string, unknown>): string | undefined {
-  return firstString(node, ["toolCallId", "id", "callId"]);
+function toolCallIdOf(node: Record<string, unknown>, type = ""): string | undefined {
+  const fromField = firstString(node, ["toolCallId"]);
+  if (fromField) return fromField;
+  // `id` is the call id on toolcall_start / content items. It is *not* safe
+  // on tool_execution_start — hosts also put a session or envelope id there,
+  // which would drop every tool after the first.
+  if (
+    type === "toolcall_start" ||
+    type === "tool" ||
+    type === "toolCall" ||
+    type === "tool_call" ||
+    type === "tool-call" ||
+    type === "tool_use" ||
+    type === "tool-use" ||
+    type === "assistant_tool_call"
+  ) {
+    return firstString(node, ["id", "callId"]);
+  }
+  return undefined;
 }
 
 function shorten(text: string, max: number): string {
@@ -140,7 +158,7 @@ function updateFromContentItem(item: unknown): ProgressUpdate | undefined {
     if (!name) return undefined;
     const label = describeToolCall(name, toolArgs(node));
     return isUsefulLabel(label, "tool")
-      ? { kind: "tool", label, toolCallId: toolCallIdOf(node) }
+      ? { kind: "tool", label, toolCallId: toolCallIdOf(node, type) }
       : undefined;
   }
   const text = firstString(node, ["text", "content"]);
@@ -181,12 +199,12 @@ const IGNORE_TYPES = new Set([
   "done",
 ]);
 
-function toolLabel(node: Record<string, unknown>): ProgressUpdate | undefined {
+function toolLabel(node: Record<string, unknown>, type = ""): ProgressUpdate | undefined {
   const name = firstString(node, ["toolName", "tool", "name"]);
   if (!name) return undefined;
   const label = describeToolCall(name, toolArgs(node));
   return isUsefulLabel(label, "tool")
-    ? { kind: "tool", label, toolCallId: toolCallIdOf(node) }
+    ? { kind: "tool", label, toolCallId: toolCallIdOf(node, type || String(node.type ?? "")) }
     : undefined;
 }
 
@@ -204,11 +222,14 @@ export function progressFromEvent(event: unknown): ProgressUpdate | undefined {
   if (IGNORE_TYPES.has(type)) return undefined;
 
   if (type === "toolcall_start") {
-    const update = toolLabel(node);
-    return update ? { kind: "text", label: update.label } : undefined;
+    const update = toolLabel(node, type);
+    if (!update) return undefined;
+    // Count the start as the call. Later tool_execution_start with the same
+    // toolCallId is de-duped; a richer label (path) still updates the UI.
+    return { ...update, toolCallId: update.toolCallId ?? firstString(node, ["id", "callId"]) };
   }
 
-  if (TOOL_START_TYPES.has(type)) return toolLabel(node);
+  if (TOOL_START_TYPES.has(type)) return toolLabel(node, type);
 
   const message = node.message;
   if (message && typeof message === "object") {
@@ -254,11 +275,19 @@ export function createProgressParser(): {
 } {
   let buffer = "";
   const seenToolCalls = new Set<string>();
+  const lastLabel = new Map<string, string>();
   const take = (update: ProgressUpdate | undefined): ProgressUpdate | undefined => {
     if (!update) return undefined;
     if (update.kind === "tool" && update.toolCallId) {
-      if (seenToolCalls.has(update.toolCallId)) return undefined;
+      if (seenToolCalls.has(update.toolCallId)) {
+        if (update.label && update.label !== lastLabel.get(update.toolCallId)) {
+          lastLabel.set(update.toolCallId, update.label);
+          return { kind: "text", label: update.label };
+        }
+        return undefined;
+      }
       seenToolCalls.add(update.toolCallId);
+      lastLabel.set(update.toolCallId, update.label);
     }
     return update;
   };
