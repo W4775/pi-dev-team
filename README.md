@@ -28,7 +28,7 @@ Previous jobs stay on disk. `/devteam list` (or `/devteam continue list`) prints
 | `/devteam clear` | Wipe run state and mockups |
 | `/devteam stop` | Stop the current step: abort isolated children, abort the parent turn, and do not auto-advance |
 
-There is no `/devteam ponytail`. If you already run [ponytail](https://github.com/dietrichgebert/ponytail) as a Pi extension, leave it installed. Isolated children **do not** pass `--no-extensions`, so your other extensions keep running.
+Isolated children **do not** pass `--no-extensions`, so your other extensions keep running.
 
 ## Workflow
 

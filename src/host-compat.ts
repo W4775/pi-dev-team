@@ -36,6 +36,9 @@ export function getFlagSafe(pi: unknown, name: string): string | undefined {
   }
 }
 
+let fallbackSessionId: string | undefined;
+
+// Per-process fallback: a shared "session" id collides across instances.
 export function sessionIdFromContext(ctx: { sessionManager?: { getSessionId?: () => string } }): string {
   try {
     const id = ctx.sessionManager?.getSessionId?.();
@@ -43,7 +46,8 @@ export function sessionIdFromContext(ctx: { sessionManager?: { getSessionId?: ()
   } catch {
     /* Oh My Pi / older Pi */
   }
-  return "session";
+  fallbackSessionId ??= `session-p${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  return fallbackSessionId;
 }
 
 /** Pi emits `agent_settled`; Oh My Pi emits `agent_end`. Subscribe to both. */

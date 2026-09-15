@@ -75,12 +75,14 @@ export function runPaths(agentDir: string, sessionId: string) {
   };
 }
 
-export function currentJobPointerPath(agentDir: string) {
-  return join(agentDir, "devteam", "current");
+export function currentJobPointerPath(agentDir: string, sessionId?: string) {
+  if (!sessionId) return join(agentDir, "devteam", "current");
+  const safe = sessionId.replace(/[^\w.-]+/g, "_") || "session";
+  return join(agentDir, "devteam", `current.${safe}`);
 }
 
-export function readCurrentJobId(agentDir: string): string | undefined {
-  const path = currentJobPointerPath(agentDir);
+export function readCurrentJobId(agentDir: string, sessionId?: string): string | undefined {
+  const path = currentJobPointerPath(agentDir, sessionId);
   if (!existsSync(path)) return undefined;
   try {
     const id = readFileSync(path, "utf8").trim();
@@ -90,9 +92,9 @@ export function readCurrentJobId(agentDir: string): string | undefined {
   }
 }
 
-export function writeCurrentJobId(agentDir: string, jobId: string): void {
+export function writeCurrentJobId(agentDir: string, jobId: string, sessionId?: string): void {
   mkdirSync(join(agentDir, "devteam"), { recursive: true });
-  writeFileSync(currentJobPointerPath(agentDir), `${jobId}\n`);
+  writeFileSync(currentJobPointerPath(agentDir, sessionId), `${jobId}\n`);
 }
 export function workflowStatePaths(agentDir: string) {
   const dir = join(agentDir, "devteam");
@@ -152,15 +154,6 @@ export function loadRun(path: string): RunState | undefined {
   }
 }
 
-export function loadPreferredRun(sessionPath: string, aliasPath: string): RunState | undefined {
-  const session = loadRun(sessionPath);
-  const alias = sessionPath === aliasPath ? undefined : loadRun(aliasPath);
-  if (!session) return alias;
-  if (!alias) return session;
-  if (session.stage === "idle" && alias.stage !== "idle") return alias;
-  if (alias.stage === "idle" && session.stage !== "idle") return session;
-  return (alias.updatedAt ?? "") > (session.updatedAt ?? "") ? alias : session;
-}
 
 export function saveRun(path: string, run: RunState, agentDir?: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -175,7 +168,7 @@ export function saveRun(path: string, run: RunState, agentDir?: string): void {
       aliases.md,
       `${renderRunMarkdown(run, { canonicalPath: path, aliasPath: aliases.json })}\n`,
     );
-    if (run.jobId) writeCurrentJobId(agentDir, run.jobId);
+    if (run.jobId) writeCurrentJobId(agentDir, run.jobId, run.sessionId);
   }
 }
 
@@ -185,9 +178,7 @@ export function mutateRun(
   change: (run: RunState) => RunState | undefined,
 ): RunState | undefined {
   return withStateLock(path, () => {
-    const current = agentDir
-      ? loadPreferredRun(path, workflowStatePaths(agentDir).json)
-      : loadRun(path);
+    const current = loadRun(path);
     if (!current) return undefined;
     const next = change(current);
     if (!next) return current;

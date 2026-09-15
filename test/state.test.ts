@@ -9,13 +9,16 @@ import {
   emptyRun,
   hasBlockFindings,
   loadRun,
+  mutateRun,
   normalizeStack,
   parseFindings,
+  readCurrentJobId,
   renderRunMarkdown,
   runPaths,
   saveRun,
   updateSection,
   workflowStatePaths,
+  writeCurrentJobId,
 } from "../src/state.ts";
 import { applyHandoffTool, applyMockupTool, applyStateTool, resolveMockupRel } from "../src/tools.ts";
 
@@ -57,6 +60,22 @@ test("saveRun writes workflow_state aliases under the agent dir not a plugin fol
   assert.match(md, /Not stored in the plugin/);
 });
 
+test("two pi sessions keep separate current jobs", () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "devteam-agent-"));
+  writeCurrentJobId(agentDir, "job-a", "sess-a");
+  writeCurrentJobId(agentDir, "job-b", "sess-b");
+  assert.equal(readCurrentJobId(agentDir, "sess-a"), "job-a");
+  assert.equal(readCurrentJobId(agentDir, "sess-b"), "job-b");
+  assert.equal(readCurrentJobId(agentDir, "sess-c"), undefined);
+  const runA = emptyRun("sess-a", "task a", "job-a");
+  saveRun(runPaths(agentDir, "job-a").json, runA, agentDir);
+  assert.equal(readCurrentJobId(agentDir, "sess-a"), "job-a");
+  assert.equal(readCurrentJobId(agentDir, "sess-b"), "job-b");
+  // No alias merge: sess-b sees nothing, mutate creates nothing from sess-a.
+  assert.equal(loadRun(runPaths(agentDir, "job-b").json), undefined);
+  assert.equal(mutateRun(runPaths(agentDir, "job-b").json, agentDir, (c) => c), undefined);
+  assert.equal(loadRun(runPaths(agentDir, "job-b").json), undefined);
+});
 test("block vs note tags win over keyword heuristics", () => {
   const block = classifyFindingLine("- [block] src/api.ts: missing spec field");
   const note = classifyFindingLine("- [note] src/api.ts: long method smell");

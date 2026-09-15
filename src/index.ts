@@ -69,7 +69,7 @@ import {
 import {
   clearRunFiles,
   emptyRun,
-  loadPreferredRun,
+  loadRun,
   mutateRun,
   readCurrentJobId,
   renderRunMarkdown,
@@ -304,7 +304,7 @@ export default function (pi: ExtensionAPI) {
 
   const store: Store = {
     load() {
-      return loadPreferredRun(statePath(), workflowStatePaths(agentDirSafe()).json);
+      return loadRun(statePath());
     },
     save(run) {
       saveRun(statePath(), run, agentDirSafe());
@@ -362,7 +362,7 @@ export default function (pi: ExtensionAPI) {
       notify(ctx, `No job matches "${ref}". /devteam list to see saved jobs.`, "warning");
       return;
     }
-    const loaded = loadJob(agentDirSafe(), picked.jobId) ?? loadPreferredRun(picked.file, picked.file);
+    const loaded = loadJob(agentDirSafe(), picked.jobId) ?? loadRun(picked.file);
     if (!loaded) {
       notify(ctx, `Could not load job ${picked.jobId}.`, "error");
       return;
@@ -1497,7 +1497,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   pi.on("session_start", (_event, ctx) => {
     try {
       sessionId = sessionIdFromContext(ctx);
-      jobId = readCurrentJobId(agentDirSafe()) || sessionId;
+      jobId = readCurrentJobId(agentDirSafe(), sessionId) || sessionId;
       config = loadDevteamConfig(ctx.cwd, projectTrusted(ctx), PROJECT_CONFIG_DIRS);
       try {
         defaultTools = pi.getActiveTools();

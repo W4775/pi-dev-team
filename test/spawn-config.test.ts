@@ -302,8 +302,10 @@ test("projectTrusted is true when the host has no isProjectTrusted", () => {
   assert.equal(projectTrusted({ isProjectTrusted: () => true }), true);
 });
 
-test("sessionIdFromContext survives a missing sessionManager", () => {
-  assert.equal(sessionIdFromContext({}), "session");
+test("sessionIdFromContext mints a stable per-process id without a sessionManager", () => {
+  const a = sessionIdFromContext({});
+  assert.match(a, /^session-p\d+-[a-z0-9]+$/);
+  assert.equal(sessionIdFromContext({}), a);
   assert.equal(sessionIdFromContext({ sessionManager: { getSessionId: () => "abc" } }), "abc");
 });
 
