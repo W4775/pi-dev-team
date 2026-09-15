@@ -168,6 +168,7 @@ export type ProgressBlock = {
 };
 
 const MAX_PROGRESS_LINES = 20;
+const MAX_STORED_LINES = 40;
 
 type LiveTextNode = { setText?: (text: string) => unknown };
 type PostedPayload = { content: string; text?: string; details?: unknown };
@@ -285,6 +286,8 @@ function applyProgressEvent(block: ProgressBlock, event: ProgressEvent, now: num
     const line = (event.text || event.label || "").trim();
     if (line && block.lines[block.lines.length - 1] !== line) block.lines.push(line);
     if (event.kind === "tool") block.toolCalls += 1;
+    if (block.lines.length > MAX_STORED_LINES)
+      block.lines.splice(0, block.lines.length - MAX_STORED_LINES);
     return;
   }
   if (event.kind !== "finish" && event.kind !== "error") return;

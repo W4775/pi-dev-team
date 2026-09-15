@@ -296,8 +296,7 @@ export type ProjectConfig = {
     lint?: string[];
     demo?: string[];
   };
-  /** Abort a child after this many tool calls. 0 uses the role default (200 for implementors/reviewer, 40 for scouts, 80 otherwise). */
-  maxToolCalls?: number;
+  models?: Partial<Record<IsolatedRole, string>>;
   /** Seconds between optional progress toasts. 0 (default) turns them off; live work goes to the working line. */
   progressEvery?: number;
   /** How many implementor subagents may run at once within one layer. */

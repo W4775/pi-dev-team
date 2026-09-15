@@ -86,7 +86,19 @@ export function toolsForRole(role: IsolatedRole): string[] {
   }
   return [...READ_TOOL_NAMES, ...custom];
 }
+export const DEFAULT_CHILD_MODEL = "@task";
 
+export function resolveChildModel(
+  role: IsolatedRole,
+  parentModel: string | undefined,
+  configured?: Partial<Record<IsolatedRole, string>>,
+  ompHost = isOmpHost(),
+): string | undefined {
+  const override = configured?.[role]?.trim();
+  if (override) return override;
+  if (!ompHost) return parentModel;
+  return DEFAULT_CHILD_MODEL;
+}
 export type ChildCliOptions = {
   extensionPath: string;
   rolePromptFile: string;
@@ -316,6 +328,24 @@ export function expectedHandoffActions(role: IsolatedRole): string[] {
   }
 }
 
+export function stateSectionsForRole(role: IsolatedRole): string[] {
+  if (role === "scout") return ["task", "spec", "filesToChange", "stack"];
+  if (role === "planner_orchestrator") return ["task", "spec", "stack"];
+  if (role === "plan_critic")
+    return ["task", "spec", "layersNeeded", "scoutNotes", "stack", "filesToChange"];
+  if (role === "orchestrator")
+    return ["task", "spec", "layersNeeded", "scoutNotes", "stack", "filesToChange", "designPlan"];
+  if (role === "database" || role === "backend" || role === "frontend" || role === "general")
+    return ["task", "spec", "layersNeeded", "stack", `${role}Notes`];
+  if (role === "reviewer") return ["task", "spec", "stack", "reviewFindings"];
+  if (role === "tester") return ["task", "spec", "stack", "testResults"];
+  if (role === "linter") return ["task", "spec", "lintResults"];
+  if (role === "demo") return ["task", "spec", "stack", "frontendNotes"];
+  if (role === "design_critic") return ["task", "spec", "designPlan", "mockupPath"];
+  if (role === "commit_message") return ["task", "spec", "testResults", "lintResults"];
+  return ["task", "spec"];
+}
+
 export function childUserPrompt(
   role: IsolatedRole,
   task: string,
@@ -375,7 +405,7 @@ export function childUserPrompt(
     serviceBlock(role, service, services),
     assigned,
     review,
-    `First: call devteam_state with action "get". Then read each attached skill's SKILL.md (use the read tool).`,
+    `First: call devteam_state with action "get" and sections ${JSON.stringify(stateSectionsForRole(role))} — fetch nothing else. Then read each attached skill's SKILL.md (use the read tool).`,
     skillLines.length ? `Skill files:\n${skillLines.join("\n")}` : "",
     `Follow /skill:<name> together with TDD at agreed seams when you are implementing.`,
     handoff,

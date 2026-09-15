@@ -171,6 +171,31 @@ test("one role's tools update a single transcript message", () => {
   );
 });
 
+test("transcript blocks keep at most 40 stored lines", () => {
+  resetProgressFeed();
+  const messages: Array<{ content: string }> = [];
+  const pi = {
+    sendMessage: (message: { content: string }) => {
+      messages.push(message);
+    },
+  };
+  const now = 2_000_000;
+  postSessionLine(pi, { kind: "start", text: "Starting backend", role: "backend" }, { now });
+  for (let i = 0; i < 50; i += 1) {
+    postSessionLine(
+      pi,
+      { kind: "tool", text: `backend  edit f${i}.ts`, role: "backend", label: `edit f${i}.ts` },
+      { now: now + i },
+    );
+  }
+  const last = messages[messages.length - 1]?.content ?? "";
+  const stored = last.split("\n").filter((line) => line.startsWith("  "));
+  assert.equal(stored.length, 21);
+  assert.match(last, /50 tools/);
+  assert.match(last, /f49\.ts/);
+  assert.match(last, /20 earlier/);
+});
+
 test("parallel scouts share one block; a later critic pass is a new message", () => {
   resetProgressFeed();
   const now = 1_000_000;

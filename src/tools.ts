@@ -39,13 +39,23 @@ export type Store = {
 
 export function applyStateTool(
   store: Store,
-  params: { action: string; section?: string; value?: string },
+  params: { action: string; section?: string; sections?: string[]; value?: string },
 ): { text: string; isError?: boolean } {
   const run = store.load();
   if (!run)
     return { text: "No active /devteam run. Start one with /devteam <task>.", isError: true };
 
   if (params.action === "get") {
+    if (params.sections?.length) {
+      const unknown = params.sections.filter((name) => !isStateSection(name));
+      if (unknown.length) {
+        return { text: `Unknown sections: ${unknown.join(", ")}`, isError: true };
+      }
+      const picked: Record<string, unknown> = {};
+      for (const name of params.sections)
+        picked[name] = getSection(run, name as StateSection) ?? null;
+      return { text: JSON.stringify(picked, null, 2) };
+    }
     if (params.section) {
       if (!isStateSection(params.section)) {
         return { text: `Unknown section: ${params.section}`, isError: true };

@@ -13,6 +13,8 @@ import {
   rememberRejectedFlags,
   resetRejectedFlags,
   stripFlags,
+  resolveChildModel,
+  stateSectionsForRole,
   toolsForRole,
 } from "../src/spawn.ts";
 import { formatChildFailure } from "../src/child-process.ts";
@@ -316,6 +318,42 @@ test("child prompt names the role's tool-call budget", () => {
   assert.match(reviewer, /src\/server\/\*\*/);
   const scout = childUserPrompt("scout", "Map the UI", [], undefined, undefined, undefined, 40);
   assert.match(scout, /Stay under 40 tool calls/);
+});
+
+test("child prompt scopes state reads per role", () => {
+  assert.deepEqual(stateSectionsForRole("backend"), [
+    "task",
+    "spec",
+    "layersNeeded",
+    "stack",
+    "backendNotes",
+  ]);
+  assert.deepEqual(stateSectionsForRole("reviewer"), ["task", "spec", "stack", "reviewFindings"]);
+  assert.deepEqual(stateSectionsForRole("commit_message"), [
+    "task",
+    "spec",
+    "testResults",
+    "lintResults",
+  ]);
+  const prompt = childUserPrompt(
+    "backend",
+    "Add a route",
+    [],
+    undefined,
+    undefined,
+    undefined,
+    200,
+  );
+  assert.match(prompt, /sections \["task","spec","layersNeeded","stack","backendNotes"\]/);
+  assert.match(prompt, /fetch nothing else/);
+});
+
+test("child models default to the task tier on omp, parent elsewhere", () => {
+  assert.equal(resolveChildModel("scout", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("backend", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("reviewer", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("scout", "parent-model", { scout: "@smol" }, true), "@smol");
+  assert.equal(resolveChildModel("scout", "parent-model", undefined, false), "parent-model");
 });
 
 test("implementor tools include edit and write", () => {

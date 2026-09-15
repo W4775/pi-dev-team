@@ -1,275 +1,214 @@
+<div align="center">
+
 # pi-dev-team
 
-A [Pi](https://pi.dev) coding-agent package that runs **`/devteam`**: one command that plans a change, optionally designs HTML mockups, then implements it with specialized agents and official stack skills.
+**One command. Full team. `/devteam` plans, builds, tests, and demos.**
 
-This is a CLI extension, not a web app. Install it into Pi, then run `/devteam` in a coding session.
+Plans with scouts · Builds layer-by-layer · Tests + lints · Optional live demo
 
-## What you type
+[![Pi](https://img.shields.io/badge/Powered_by-Pi-7c3aed?style=flat-square)](https://pi.dev)
+[![Oh My Pi](https://img.shields.io/badge/Compatible-OMP-0a0a0a?style=flat-square)](https://github.com/coder/oh-my-pi)
+[![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-182_passing-brightgreen?style=flat-square)](#tests)
 
-```text
-/devteam Add a settings page for profile and notification preferences
+[Quick Start](#-quick-start) · [How it Works](#-how-it-works) · [Commands](#-commands) · [Config](#-config) · [Stack Skills](#-stack-skills)
+
+</div>
+
+---
+
+## ⚡ Quick Start
+
+```bash
+# Pi
+pi install https://github.com/W4775/pi-dev-team
+# OMP
+omp plugin install github:W4775/pi-dev-team
 ```
 
-Answer the planner in the same chat with the option picker (including Other to type your own answer). Scouts run first so the planner already knows what is in the repo. After the plan critic runs, you accept or reject each suggestion; the planner patches only what you accepted, then implementation starts. HTML mockups run only if you already stored `wantMockup` during grilling.
+Then in any Pi/OMP session:
 
-Previous jobs stay on disk. `/devteam list` (or `/devteam continue list`) prints them; `/devteam continue 2` resumes that job.
+```text
+/devteam Add a settings page for profile and notifications
+```
 
-### Commands
+Answer the planner's picker → review the critic → watch layers build. Done.
 
-| Command | Effect |
-| --- | --- |
-| `/devteam <task>` | Start a **new** job (previous jobs are kept) |
-| `/devteam continue` | Resume the **current** step after a stop or a failed child |
-| `/devteam list` | Show saved jobs (newest first). Same as `/devteam continue list` |
-| `/devteam continue <n\|id>` | Switch to that job **at its saved stage** (does not start a new planner) and keep executing |
-| `/devteam skip` | Skip the current step (critic, review, remaining scouts, designer, remaining implement work, or a QA stage) |
-| `/devteam status` | Print the run notebook |
-| `/devteam mockup` | Print (and try to open) the HTML mockup |
-| `/devteam clear` | Wipe run state and mockups |
-| `/devteam stop` | Stop the current step: abort isolated children, abort the parent turn, and do not auto-advance |
+> Previous jobs persist. ` /devteam list` to resume. Each session owns its own run.
 
-Isolated children **do not** pass `--no-extensions`, so your other extensions keep running.
+---
 
-## Workflow
+## 🧠 How it Works
 
-1. **Planner orchestrator** (isolated) — splits the task into 2–4 read-only scouts
-2. **Scouts** (isolated, parallel) — report existing files, types, and contracts into run state
-3. **Planner** (this session) — grills you with selectable options, writes a spec that uses those findings
-4. **Plan critic** (isolated) — itemized holes; you accept or reject each one
-5. **Designer + design critic** — only if you stored `wantMockup` during grilling
-6. **Orchestrator** (isolated) — splits the spec into work items with file allowlists
-7. **Implementors** — only the layers this change needs (database → backend → frontend → general, skipping any that have no notes, files, or work items). Items with disjoint files in the same layer run together (default 3, cap 6). After each layer, a **reviewer** judges that layer; `qa_fail` sends that layer's implementor back to fix, then review runs again until it passes (max 3 fix rounds). Only then does the next layer start. If the orchestrator produces no items, the sequential path still runs **those needed layers only**, with the same per-layer review loop.
-8. **Tester → linter** after the last layer's review passes, each with its own fix-it loop (max 3 rounds). Blocks vs notes. Fowler smells are notes. Hitting a cap continues to the next QA stage.
-9. **Demo** — only for web frontends you opted into (`wantDemo` during grilling, or yes when asked after QA). A demo child serves the app locally and drives it live in a headed Playwright browser while you watch. Findings are notes, never blocks. Afterwards you accept or request changes; changes loop back to the planner with your feedback (max 2 demos), then QA runs again.
-10. **Commit-message** — drafts a conventional message. **Does not commit.**
+**Scout → Plan → Build → Prove.**
 
-Planner and designer stay in the current Pi session. Everything else is an isolated `pi` child using the same model. When a role calls `devteam_handoff`, the next role starts immediately.
+| Step | What happens | Who |
+|------|--------------|-----|
+| **Scout** | 2–4 parallel read-only scouts map your repo | child |
+| **Plan** | Planner grills you (picker), writes spec; critic patches it | you + child |
+| **Design** | HTML mockup *only if* you opted `wantMockup` | you |
+| **Build** | Orchestrator splits spec → layers (`database → backend → frontend → general`) run in parallel waves (cap 6), reviewer gates each layer (3 rounds) | children |
+| **Prove** | Tester → Linter (3 fix rounds each) | children |
+| **Demo** | Headed Playwright drives your app *only for web UIs* with `wantDemo` | child |
+| **Ship** | Drafts conventional commit — *never commits* | child |
 
-### The pipeline
+All remotes are isolated processes. Planner/designer stay in your session; children run as `pi -a` / `omp --yolo @task`.
 
-The planner (and designer, if you asked for mockups) talk to you in this session. Critic suggestions pause for your Accept / Reject. After a demo, you accept or request changes; requested changes loop back to the planner with your feedback. Everything labelled *child* is a separate `pi`/`omp` process. `/devteam stop` halts the current step; `/devteam skip` skips it.
+---
+
+## 🎮 Commands
+
+| Command | Does |
+|---------|------|
+| `/devteam <task>` | Start new job |
+| `/devteam continue` | Resume current step |
+| `/devteam list` | Show saved jobs |
+| `/devteam continue 2` | Jump to job #2 at saved stage |
+| `/devteam skip` | Skip critic / review / QA / demo |
+| `/devteam stop` | Abort current step |
+| `/devteam status` | Show notebook paths |
+| `/devteam mockup` | Open HTML mockup |
+| `/devteam clear` | Wipe current job |
+
+---
+
+## 🔄 Pipeline
 
 ```mermaid
 flowchart TD
-    Start["/devteam your task"] --> ScoutOrch["Planner orchestrator · child"]
-    ScoutOrch -->|scout_planned| Scouts["Scouts · parallel children"]
-    ScoutOrch -.->|"no scout items"| Planner
-    Scouts --> Planner["Planner · this session · ask picker"]
-
-    Planner -->|plan_ready| PlanCritic["Plan critic · child"]
-    PlanCritic -->|critic_revise| PlanReview["You review each suggestion"]
-    PlanReview -->|"accepted items"| Planner
-    PlanReview -->|all rejected / skip| MockupQ
-    PlanCritic -->|critic_approve| MockupQ{"wantMockup already true?"}
-
-    MockupQ -->|no| Orchestrator
-    MockupQ -->|yes| Designer["Designer · this session"]
-
-    Designer -->|design_ready| DesignCritic["Design critic · child"]
-    DesignCritic -->|"critic_revise · max 2 rounds"| Designer
-    DesignCritic -->|critic_approve| Orchestrator
-
-    Orchestrator["Orchestrator · child<br/>writes workItems"] -->|work_planned| Implement["Implement · one layer"]
-    Orchestrator -.->|"no work items"| Sequential["Fallback · needed layers only"]
-    Sequential --> Implement
-
-    Implement --> Reviewer["Reviewer · that layer · child"]
-    Implement -->|item failed| Retry["Retry once, then review this layer"]
-    Retry --> Reviewer
-
-    Reviewer -->|qa_fail| FixReview["fix_review · this layer"]
-    FixReview --> Reviewer
-    Reviewer -->|qa_pass and more layers| Implement
-    Reviewer -->|qa_pass last layer / skip / cap| Tester["Tester · child"]
-
-    Tester -->|qa_fail| FixTest["fix_test"]
-    FixTest --> Tester
-    Tester -->|qa_pass / fix cap| Linter["Linter · child"]
-
-    Linter -->|qa_fail| FixLint["fix_lint"]
-    Linter -->|qa_pass / fix cap| DemoQ{"wantDemo? web UI?"}
-    FixLint --> Linter
-
-    DemoQ -->|no / skip| Commit["Commit message · child"]
-    DemoQ -->|unset| DemoAsk["You: yes or no"]
-    DemoAsk -->|no / skip| Commit
-    DemoQ -->|yes| Demo["Demo · child · headed browser"]
-    DemoAsk -->|yes| Demo
-
-    Demo -->|qa_pass| DemoReview["You: accept or request changes"]
-    DemoReview -->|accept / skip / 2 rounds| Commit
-    DemoReview -->|request changes| Planner
-
-    Commit -->|commit_drafted| Done["Draft commit message · nothing is committed"]
+    A[/devteam task/] --> S[Scouts · parallel]
+    S --> P[Planner · picker]
+    P --> C[Plan Critic]
+    C -->|revise| P
+    C --> O[Orchestrator · workItems]
+    O --> B[Build · wave per layer]
+    B --> R[Reviewer · per layer]
+    R -->|qa_fail ×3| B
+    R --> T[Tester] --> L[Linter] --> D{wantDemo?}
+    D -->|yes| Demo[Demo · Playwright]
+    Demo -->|changes| P
+    D --> M[Commit draft]
 ```
 
-Each implementor-layer review and each tester/linter fix loop is capped at 3 rounds. Hitting a cap continues to the next layer (or the next QA stage). Demo feedback loops back to the planner at most once (2 demos total).
+Waves run together when file lists don't collide. No `workItems`? Falls back to needed layers only.
 
-### Inside the implement stage
-
-Work items run layer by layer. Within a layer, items whose file lists cannot collide run at the same time:
+<details>
+<summary>Inside a build wave</summary>
 
 ```mermaid
 flowchart LR
-    Plan["workItems"] --> DB
-
-    subgraph DB["database · wave 1"]
-        d1["schema + migration<br/>prisma/**"]
-    end
-
-    subgraph BE["backend · wave 2, side by side"]
-        b1["POST /od/snapshot<br/>src/server/routes/od/**"]
-        b2["snapshot service<br/>src/server/services/**"]
-    end
-
-    subgraph FE["frontend · wave 3, side by side"]
-        f1["snapshot list<br/>src/app/od/list.tsx"]
-        f2["filter bar<br/>src/components/filters/**"]
-        f3["empty + error states<br/>src/app/od/states.tsx"]
-    end
-
-    subgraph GEN["general · wave 4"]
-        g1["seed script<br/>scripts/**"]
-    end
-
-    DB --> ReviewDB["Reviewer · database"] --> BE
-    BE --> ReviewBE["Reviewer · backend"] --> FE
-    FE --> ReviewFE["Reviewer · frontend"] --> GEN
-    GEN --> ReviewGEN["Reviewer · general"]
+    Plan[workItems] --> DB[database]
+    DB --> BE[backend · 2 parallel]
+    BE --> FE[frontend · 3 parallel]
+    FE --> GEN[general]
+    DB -.-> R1[review] -.-> BE -.-> R2 -.-> FE -.-> R3 -.-> GEN -.-> R4
 ```
 
-`b1` and `b2` run together, as do `f1`, `f2` and `f3`, because no two of them claim the same paths. An item that lists overlapping paths waits for the next wave, and an item that lists no paths runs alone. The reviewer for a layer must pass (or hit the fix cap) before the next layer starts. The orchestrator finishes before any implementor starts; implementors never overlap with it.
+Reviewer must pass (or hit 3-round cap) before next layer starts.
 
-Run state lives under the Pi **agent** directory, not the plugin install folder and not your repo. There is no `workflow_state` file inside `~/.omp/plugins/` (or wherever omp copies this package).
+</details>
 
-Stable aliases (created when a run starts):
+---
 
-```text
-~/.omp/agent/devteam/workflow_state.json
-~/.omp/agent/devteam/workflow_state.md
-```
+## ⚙️ Config
 
-On Pi the same files are under `~/.pi/agent/devteam/`. Each job is a JSON file:
-
-```text
-~/.pi/agent/devteam/runs/<job-id>.json
-~/.pi/agent/devteam/runs/<job-id>/mockup/index.html
-```
-
-`/devteam status` prints these paths. See `WHERE-IS-WORKFLOW-STATE.md` in the plugin folder.
-
-A new `/devteam <task>` starts a **new job** and leaves earlier jobs in the list. `/devteam clear` deletes only the current job. `/new` and `/fork` do not delete saved jobs.
-
-## Stack skills
-
-Implementors always get the bundled `implement` and `tdd` skills. They also get **official** language/framework skills resolved at run time (Angular, React Native, React, Vue, .NET web API, Blazor, Postgres, EF Core, plus small tester add-ons). Those trees are **not** vendored here.
-
-Resolution order:
-
-1. Trusted `.pi/devteam.json` overrides
-2. Skills already installed in Pi / `.agents/skills`
-3. Sparse clone into `~/.pi/agent/devteam/skill-cache/`
-4. If fetch fails: warn and continue with workflow skills only
-
-Cap is **3** stack skills per child.
-
-### Project config (trusted projects only)
-
-`.pi/devteam.json`:
+Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects only:
 
 ```json
 {
-  "skills": {
-    "frontend": ["angular"],
-    "backend": ["dotnet"],
-    "database": ["postgres"],
-    "extra": ["/abs/path/to/custom-skill"]
-  },
-  "paths": {
-    "frontend": ["src/app/**", "src/components/**"]
-  },
-  "services": [
-    { "name": "api", "root": "services/api", "layer": "backend", "test": ["go test ./..."] },
-    { "name": "web", "root": "web", "layer": "frontend", "test": ["npm test"], "serve": ["npm run dev"] }
-  ],
-  "maxToolCalls": 200,
+  "skills": { "frontend": ["angular"], "backend": ["dotnet"], "database": ["postgres"] },
+  "paths": { "frontend": ["src/app/**"] },
+  "services": [{ "name": "api", "root": "services/api", "layer": "backend", "test": ["go test ./..."] }],
   "parallel": 3,
-  "childIdle": 480,
-  "repeatToolAbort": 8
+  "maxToolCalls": 200,
+  "models": { "scout": "@smol", "reviewer": "@slow" }
 }
 ```
 
-Ids are catalog ids from `catalog/stacks.json`. An empty array means no stack skill for that layer. `extra` absolute paths are always appended.
+- `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
+- `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
+- `models` — alias per role (OMP `@task` by default; Pi uses session model)
+- `parallel` / `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune concurrency & budgets
 
-### Multiple backend languages
+<details>
+<summary>State locations & resolution</summary>
 
-Detection walks the tree for build manifests (`go.mod`, `pyproject.toml`, `package.json`, `.csproj`, and the rest) and turns each directory that owns one into a **service**. A Go API next to a Python worker becomes two backend services. The orchestrator can name a `service` on each work item (that service's root is the write allowlist if `files` is omitted). If it produces no items, the backend implementor still runs **once per service**, scoped to that service's files, skills, and test command.
+```
+~/.pi/agent/devteam/runs/<job-id>.json          # Pi
+~/.omp/agent/devteam/workflow_state.json        # OMP
+~/.pi/agent/devteam/skill-cache/                # sparse clones
+```
 
-If the scan guesses wrong, declare `services` in `.pi/devteam.json` or `.omp/devteam.json`. Config merges over detection by name or root.
+Each Pi session tracks its own current job. `/devteam status` prints paths. See `WHERE-IS-WORKFLOW-STATE.md`.
 
-The tester and linter then run each service's own command from that service's directory. Cross-service contracts belong in the spec — each pass cannot see the other service's code.
+Resolution: `devteam.json` → installed skills → sparse clone → warn + continue.
 
-### Isolated child progress
+</details>
 
-The widget above the editor is one line: **step · role · elapsed** (`implement · backend · 1:23`). Child work is one **session transcript** block per role, updated in place (`plan critic · 0:12 · 4 tools` with the current actions underneath). Parallel scouts share a scout block; a later critic pass is a new block so it stays below the planner. The working loader and footer stay empty so that stack is not duplicated. Optional `progressEvery` toasts are off unless you set them in `devteam.json`. Streamed one-word tokens such as `hub` are ignored; only a tool call or a full sentence is logged. Child **stdout is kept in full** — it is the workflow's memory, not a log to trim.
+---
 
-A child that hits `maxToolCalls` is aborted instead of looping for thousands of calls. Defaults are **200** for implementors, reviewer, tester, and linter; **40** for scouts; **80** for the other specialists. A project `maxToolCalls` overrides those defaults (scouts still cap at 40). A child that produces no output for `childIdle` seconds (8 minutes by default) is aborted. A child that repeats the same **inspect** of the same target `repeatToolAbort` times in a row (8 by default) is aborted — `edit` / `write` / `bash` of one file is not a loop, and a bare `read` with no path is ignored. Oh My Pi JSON mode streams `thinking_delta` / `text_delta` tokens and `tool_stream_update` / `tool_execution_update` chunks; those are not counted as new tool calls. `/devteam stop` stops the current step; `/devteam continue` resumes it; `/devteam skip` skips it.
+## 🧩 Stack Skills
 
-If a specialist exits cleanly without calling `devteam_handoff`, the parent infers the action from run state (critic notes, stored work items, findings, and so on) so the pipeline does not stall.
+Bundled: `implement` + `tdd`. Plus official stacks (React, Vue, Angular, React Native, .NET, Blazor, Postgres, EF Core…) — not vendored, fetched on demand.
 
-## Install and run
+Progress: one-line widget `step · role · 1:23` + 40-line transcript blocks per role.
 
-### Pi
+Budgets: `200` calls for builders/review/test/lint/demo, `40` scouts, `80` specialists; `childIdle 480s`, `repeatToolAbort 8`.
 
-Requires [Pi](https://pi.dev) and Node 22+.
+---
+
+## 🔒 Permissions
+
+| Role | Can |
+|------|-----|
+| Planner / Critics / Reviewer | Read-only |
+| Designer | `devteam_mockup` only |
+| Implementors | Edit tree, no `.env`/keys, no `git commit` |
+| Demo | `serve` + Playwright, writes `demo/` only |
+
+Optional per-layer `paths` globs further restrict writes.
+
+---
+
+## 📦 Install Details
+
+**Pi** — Node 22+:
 
 ```bash
-pi -e ./src/index.ts
-# or
+pi -e ./src/index.ts          # dev
 pi install https://github.com/W4775/pi-dev-team
 ```
 
-Then `/devteam …` in the TUI.
-
-### Oh My Pi (omp)
-
-Do **not** `omp plugin link` a checkout that still has a nested `.git` if your omp version errors on that symlink. Install from GitHub (copies into the plugin cache, then links that copy):
+**OMP** — don't `omp plugin link` a checkout with nested `.git` on older OMP:
 
 ```bash
 omp plugin install github:W4775/pi-dev-team
-# or from a clone:
-omp plugin install /absolute/path/to/pi-dev-team
+omp plugin install /abs/path/to/pi-dev-team  # from clone
 ```
 
-This package is written for both hosts. Oh My Pi does not export Pi’s `withFileMutationQueue`; we fall back to a local file queue so the extension can load. Isolated children are still OS processes (the extension API cannot spawn omp’s in-process `task` subagents). On Oh My Pi they launch the way omp launches itself (`PI_SUBPROCESS_CMD`, the packed binary, or `omp.cmd` on Windows), pass `--yolo` (not Pi’s `-a`), map `find`/`ls` to `glob`, and send role/run-state via `DEVTEAM_ROLE` / `DEVTEAM_STATE`. `--skill` is a Pi flag; omp’s `--skills` is only a glob filter, so skill paths are listed in the child prompt for the `read` tool. If a child still dies with `Error: unknown flags: -a, --skill`, it is retried without those flags and later children skip them.
+Upgrade: `omp plugin uninstall pi-dev-team && omp plugin install github:W4775/pi-dev-team`
 
-Run state on omp is under `~/.omp/agent/devteam/` (via `getAgentDir()`), including `workflow_state.json`. Project overrides: `.omp/devteam.json` or `.pi/devteam.json`.
+OMP children use `PI_SUBPROCESS_CMD` / `omp --yolo` + `DEVTEAM_ROLE`.
 
-After upgrading from an older install:
+---
+
+## ✅ Tests
 
 ```bash
-omp plugin uninstall pi-devteam
-omp plugin uninstall pi-dev-team
-omp plugin install github:W4775/pi-dev-team
+npm test          # 182 tests, no Pi needed
+npm run lint      # oxlint
+npm run fmt:check # oxfmt (fix: npm run fmt)
 ```
 
+Covers: permissions, per-session state, teardown, layer routing, block vs note, stack detection, model tiers, transcript caps.
 
-## Tests
+---
 
-```bash
-npm test
-```
+<div align="center">
 
-Unit tests cover permissions, run state, skip behavior, layer routing, block vs note, stack detection, catalog matching, and skill resolve order. They do not require Pi to be installed.
+MIT for pi-dev-team · See `NOTICE` for skill licenses (Matt Pocock MIT, Anthropic Apache-2.0)
 
-## Permissions
+*PRs welcome — keep it thin, keep it tested.*
 
-- Planner, critics, reviewer, and commit-message cannot edit the repo
-- Designer writes mockups only via `devteam_mockup`
-- Implementors may edit the tree but cannot write `.env` / key files and cannot `git commit`
-- Demo may run the agreed serve command and headed Playwright, and write under the run's demo directory only
-- Optional per-layer path globs in `devteam.json`
-
-## License
-
-MIT for original pi-dev-team code. See `NOTICE` for third-party skill licenses (Matt Pocock MIT, Anthropic Apache-2.0).
+</div>

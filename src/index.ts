@@ -71,6 +71,7 @@ import {
   childUserPrompt,
   parseUnknownFlags,
   rememberRejectedFlags,
+  resolveChildModel,
   toolsForRole,
 } from "./spawn.ts";
 import {
@@ -734,8 +735,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       role,
       statePath: statePath(),
       skillDirs: dirs,
-      tools: toolsForRole(role),
-      model: modelId(ctx),
+      model: resolveChildModel(role, modelId(ctx), config?.models),
       thinking: thinkingOf(ctx),
       trusted: projectTrusted(ctx),
       serviceName: service?.name,
@@ -1444,6 +1444,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       action: StringEnum(["get", "replace", "append"] as const),
       section: Type.Optional(
         Type.String({ description: `Section to update. One of: ${STATE_SECTIONS.join(", ")}` }),
+      ),
+      sections: Type.Optional(
+        Type.Array(Type.String(), {
+          description: `Get only these sections. One of: ${STATE_SECTIONS.join(", ")}`,
+        }),
       ),
       value: Type.Optional(
         Type.String({

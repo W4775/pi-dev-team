@@ -174,6 +174,24 @@ test("devteam_state get/replace and handoff pending", () => {
   assert.equal(handoff.terminate, true);
   assert.equal(loadRun(path)?.pendingHandoff?.action, "plan_ready");
 });
+test("devteam_state get accepts a section list and rejects unknown names", () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "devteam-agent-"));
+  const sessionId = "s3";
+  const path = runPaths(agentDir, sessionId).json;
+  saveRun(path, emptyRun(sessionId, "scoped task"));
+  const store = {
+    load: () => loadRun(path),
+    save: (run: ReturnType<typeof emptyRun>) => saveRun(path, run),
+    agentDir: () => agentDir,
+    sessionId: () => sessionId,
+  };
+  applyStateTool(store, { action: "replace", section: "spec", value: "A spec" });
+  const got = applyStateTool(store, { action: "get", sections: ["task", "spec"] });
+  assert.equal(got.isError, undefined);
+  assert.deepEqual(JSON.parse(got.text), { task: "scoped task", spec: "A spec" });
+  const bad = applyStateTool(store, { action: "get", sections: ["spec", "nope"] });
+  assert.equal(bad.isError, true);
+});
 
 test("mockup path cannot escape the mockup directory", () => {
   assert.equal(resolveMockupRel("../secret"), undefined);
