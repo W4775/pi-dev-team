@@ -42,6 +42,7 @@ import {
   activeRole,
   applyContinue,
   applyCritiqueDecisions,
+  applyDemoReview,
   applyHandoff,
   applySkip,
   applyStop,
@@ -614,6 +615,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               ? `Spec already stored. Grill only remaining holes, then call devteam_handoff with plan_ready when the spec is complete.\n\n${run.spec.slice(0, 6000)}`
               : "No spec stored yet. Continue grilling from unanswered questions. Do not re-ask decisions already in devteam_state.",
             run.openQuestions ? `Open questions:\n${run.openQuestions}` : "",
+            run.demoFeedback?.trim()
+              ? `Demo feedback (user watched the live demo, patch the spec for exactly this):\n${run.demoFeedback}`
+              : "",
+            run.demoNotes?.trim() ? `Demo notes:\n${run.demoNotes.slice(0, 4000)}` : "",
             run.scoutNotes?.trim()
               ? `Scout notes (facts about this repo):\n${run.scoutNotes.slice(0, 8000)}`
               : "",
@@ -1165,6 +1170,58 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     return next;
   }
 
+  async function presentDemoReview(
+    ctx: ExtensionContext,
+    run: RunState,
+  ): Promise<RunState | undefined> {
+    logProgress(ctx, {
+      kind: "start",
+      role: "demo review",
+      stage: "demo_review",
+      text: `Demo round ${run.demoRound ?? 1}: accept or request changes`,
+    });
+    const answers = await promptQuestions(
+      ctx,
+      [
+        {
+          id: "demo",
+          question: `Demo notes:\n\n${run.demoNotes?.trim() || "(no notes recorded)"}\n\nAccept, or request changes to loop back to the planner?`,
+          options: ["Accept", "Request changes"],
+        },
+      ],
+      { signal: dialogAbort.signal },
+    );
+    const latest = store.load() ?? run;
+    if (latest.halted || latest.stage !== "demo_review") return latest;
+    if (!answers) {
+      if (!ctx.hasUI) return applyDemoReview(latest, true);
+      haltWorkflow(ctx, latest);
+      notify(
+        ctx,
+        "Stopped at demo review. /devteam continue to review again, or /devteam skip to finish.",
+        "warning",
+      );
+      return undefined;
+    }
+    const answer = answers[0];
+    const feedback = answer?.custom?.trim();
+    const accepted =
+      !feedback && (answer?.selected.join(" ").toLowerCase().includes("accept") ?? true);
+    const next = applyDemoReview(latest, accepted, feedback);
+    logProgress(ctx, {
+      kind: "tool",
+      role: "demo review",
+      label: accepted ? "accept" : "request changes",
+      text: accepted
+        ? "demo review  accept"
+        : `demo review  request changes${feedback ? `: ${feedback}` : ""}`,
+    });
+    if (!accepted && next.stage === "commit_message") {
+      notify(ctx, "Demo round cap reached. Finishing with the commit message.", "warning");
+    }
+    return next;
+  }
+
   async function advancePipeline(ctx: ExtensionContext, incoming: RunState) {
     if (advancing) return;
     advancing = true;
@@ -1214,6 +1271,12 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
 
         if (needsUserReview(run.stage)) {
           const reviewed = await presentPlanReview(ctx, run);
+          if (!reviewed || reviewed.halted) return;
+          run = persist(reviewed);
+          continue;
+        }
+        if (run.stage === "demo_review") {
+          const reviewed = await presentDemoReview(ctx, run);
           if (!reviewed || reviewed.halted) return;
           run = persist(reviewed);
           continue;

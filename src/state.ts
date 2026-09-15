@@ -38,6 +38,7 @@ export const STATE_SECTIONS = [
   "demoPath",
   "demoVersion",
   "demoNotes",
+  "demoFeedback",
   "designCritiqueNotes",
   "databaseNotes",
   "backendNotes",
@@ -262,6 +263,8 @@ export function getSection(run: RunState, section: StateSection): unknown {
       return run.demoVersion;
     case "demoNotes":
       return run.demoNotes;
+    case "demoFeedback":
+      return run.demoFeedback;
     case "databaseNotes":
       return run.databaseNotes;
     case "backendNotes":
@@ -363,6 +366,9 @@ export function updateSection(run: RunState, section: StateSection, value: unkno
       break;
     case "demoVersion":
       next.demoVersion = Number(value) || 0;
+      break;
+    case "demoFeedback":
+      next.demoFeedback = String(value ?? "");
       break;
     case "demoNotes":
       next.demoNotes = String(value ?? "");
@@ -547,6 +553,7 @@ export function renderRunMarkdown(
       lines.push(`- **${f.severity}/${f.axis}:** ${f.text}`);
     }
   }
+  if (run.demoFeedback) lines.push(``, `## Demo feedback`, ``, run.demoFeedback);
   if (run.testResults) lines.push(``, `## Tests`, ``, run.testResults);
   if (run.lintResults) lines.push(``, `## Lint`, ``, run.lintResults);
   if (run.demoPath) lines.push(``, `- **Demo:** ${run.demoPath} (v${run.demoVersion ?? 1})`);

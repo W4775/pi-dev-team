@@ -40,14 +40,14 @@ Isolated children **do not** pass `--no-extensions`, so your other extensions ke
 6. **Orchestrator** (isolated) — splits the spec into work items with file allowlists
 7. **Implementors** — only the layers this change needs (database → backend → frontend → general, skipping any that have no notes, files, or work items). Items with disjoint files in the same layer run together (default 3, cap 6). After each layer, a **reviewer** judges that layer; `qa_fail` sends that layer's implementor back to fix, then review runs again until it passes (max 3 fix rounds). Only then does the next layer start. If the orchestrator produces no items, the sequential path still runs **those needed layers only**, with the same per-layer review loop.
 8. **Tester → linter** after the last layer's review passes, each with its own fix-it loop (max 3 rounds). Blocks vs notes. Fowler smells are notes. Hitting a cap continues to the next QA stage.
-9. **Demo** — only for web frontends you opted into (`wantDemo` during grilling, or yes when asked after QA). A demo child serves the app locally and drives it live in a headed Playwright browser while you watch. Findings are notes, never blocks.
+9. **Demo** — only for web frontends you opted into (`wantDemo` during grilling, or yes when asked after QA). A demo child serves the app locally and drives it live in a headed Playwright browser while you watch. Findings are notes, never blocks. Afterwards you accept or request changes; changes loop back to the planner with your feedback (max 2 demos), then QA runs again.
 10. **Commit-message** — drafts a conventional message. **Does not commit.**
 
 Planner and designer stay in the current Pi session. Everything else is an isolated `pi` child using the same model. When a role calls `devteam_handoff`, the next role starts immediately.
 
 ### The pipeline
 
-The planner (and designer, if you asked for mockups) talk to you in this session. Critic suggestions pause for your Accept / Reject. Everything labelled *child* is a separate `pi`/`omp` process. `/devteam stop` halts the current step; `/devteam skip` skips it.
+The planner (and designer, if you asked for mockups) talk to you in this session. Critic suggestions pause for your Accept / Reject. After a demo, you accept or request changes; requested changes loop back to the planner with your feedback. Everything labelled *child* is a separate `pi`/`omp` process. `/devteam stop` halts the current step; `/devteam skip` skips it.
 
 ```mermaid
 flowchart TD
@@ -87,13 +87,23 @@ flowchart TD
     Tester -->|qa_pass / fix cap| Linter["Linter · child"]
 
     Linter -->|qa_fail| FixLint["fix_lint"]
-    Linter -->|qa_pass / fix cap| Commit["Commit message · child"]
+    Linter -->|qa_pass / fix cap| DemoQ{"wantDemo? web UI?"}
     FixLint --> Linter
+
+    DemoQ -->|no / skip| Commit["Commit message · child"]
+    DemoQ -->|unset| DemoAsk["You: yes or no"]
+    DemoAsk -->|no / skip| Commit
+    DemoQ -->|yes| Demo["Demo · child · headed browser"]
+    DemoAsk -->|yes| Demo
+
+    Demo -->|qa_pass| DemoReview["You: accept or request changes"]
+    DemoReview -->|accept / skip / 2 rounds| Commit
+    DemoReview -->|request changes| Planner
 
     Commit -->|commit_drafted| Done["Draft commit message · nothing is committed"]
 ```
 
-Each implementor-layer review and each tester/linter fix loop is capped at 3 rounds. Hitting a cap continues to the next layer (or the next QA stage).
+Each implementor-layer review and each tester/linter fix loop is capped at 3 rounds. Hitting a cap continues to the next layer (or the next QA stage). Demo feedback loops back to the planner at most once (2 demos total).
 
 ### Inside the implement stage
 

@@ -23,7 +23,12 @@ import type {
   Stage,
   UiSurface,
 } from "./types.ts";
-import { IMPLEMENTOR_LAYERS, MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS } from "./types.ts";
+import {
+  IMPLEMENTOR_LAYERS,
+  MAX_DEMO_ROUNDS,
+  MAX_DESIGN_REJECTS,
+  MAX_FIX_ROUNDS,
+} from "./types.ts";
 
 const LAYER_SET = new Set<string>(IMPLEMENTOR_LAYERS);
 
@@ -135,7 +140,11 @@ export function shouldOfferDemo(
 
 export function proceedAfterLint(run: RunState): RunState {
   if (shouldOfferDemo(run)) {
-    return goToStage(stamp(run, { pauseReason: undefined }), "demo", { currentRole: "demo" });
+    return goToStage(
+      stamp(run, { pauseReason: undefined, demoRound: (run.demoRound ?? 0) + 1 }),
+      "demo",
+      { currentRole: "demo" },
+    );
   }
   if (run.wantDemo === undefined && shouldOfferMockup(run)) {
     return goToStage(stamp(run, { pauseReason: undefined }), "demo_opt_in");
@@ -217,6 +226,7 @@ export function pauseForStage(stage: Stage): PauseReason | undefined {
   if (stage === "plan_review") return "plan_review";
   if (stage === "mockup_opt_in") return "mockup_opt_in";
   if (stage === "demo_opt_in") return "demo_opt_in";
+  if (stage === "demo_review") return "demo_review";
   if (stage === "build_it_pause") return "build_it";
   return undefined;
 }
@@ -278,6 +288,11 @@ export function applySkip(run: RunState): RunState {
   }
   if (current.stage === "demo_opt_in") {
     return proceedAfterLint(stamp(current, { wantDemo: false }));
+  }
+  if (current.stage === "demo_review") {
+    return goToStage(stamp(current, { pauseReason: undefined }), "commit_message", {
+      currentRole: "commit_message",
+    });
   }
 
   if (current.stage === "designer" || current.stage === "design_critic") {
@@ -526,6 +541,9 @@ export function continueHint(run: RunState): string {
   if (run.stage === "demo_opt_in") {
     return "Answer yes to watch a live demo, or /devteam skip to finish without one.";
   }
+  if (run.stage === "demo_review") {
+    return "Accept the demo, or request changes to loop back to the planner (max 2 demos).";
+  }
   return `Nothing to continue at stage ${run.stage}. Try /devteam status.`;
 }
 
@@ -651,6 +669,19 @@ export function acceptMockupChoice(run: RunState, want: boolean): RunState {
 export function acceptDemoChoice(run: RunState, want: boolean): RunState {
   if (run.stage !== "demo_opt_in") return run;
   return want ? applyContinue(run) : applySkip(run);
+}
+
+export function applyDemoReview(run: RunState, accepted: boolean, feedback?: string): RunState {
+  if (run.stage !== "demo_review") return run;
+  if (accepted || (run.demoRound ?? 0) >= MAX_DEMO_ROUNDS) {
+    return goToStage(stamp(run, { pauseReason: undefined }), "commit_message", {
+      currentRole: "commit_message",
+    });
+  }
+  return goToStage(
+    stamp(run, { pauseReason: undefined, demoFeedback: feedback?.trim() || undefined }),
+    "planner",
+  );
 }
 
 export function canFix(run: RunState, kind: "review" | "test" | "lint"): boolean {
@@ -869,6 +900,9 @@ export function applyHandoff(
       }
       if (cleared.stage === "linter" || cleared.stage === "fix_lint") {
         return proceedAfterLint(stamp(cleared, { pauseReason: undefined }));
+      }
+      if (cleared.stage === "demo") {
+        return goToStage(stamp(cleared, { pauseReason: undefined }), "demo_review");
       }
       return goToStage(cleared, "commit_message", { currentRole: "commit_message" });
 

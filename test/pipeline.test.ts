@@ -4,6 +4,7 @@ import { emptyRun } from "../src/state.ts";
 import {
   acceptDemoChoice,
   acceptMockupChoice,
+  applyDemoReview,
   applyContinue,
   applyHandoff,
   applySkip,
@@ -123,7 +124,7 @@ test("demo opt-in yes/no advances or finishes", () => {
   assert.equal(applySkip(run(waiting)).stage, "commit_message");
 });
 
-test("qa_pass after linter honors demo, demo lands on commit", () => {
+test("qa_pass after linter honors demo, demo lands on review", () => {
   const linter: Partial<RunState> = {
     stage: "linter",
     layersNeeded: ["frontend"],
@@ -133,7 +134,20 @@ test("qa_pass after linter honors demo, demo lands on commit", () => {
   assert.equal(applyHandoff(run(linter), "qa_pass").stage, "demo");
   const demo = run({ stage: "demo" });
   assert.equal(inferHandoffAction("demo", demo), "qa_pass");
-  assert.equal(applyHandoff(demo, "qa_pass").stage, "commit_message");
+  assert.equal(applyHandoff(demo, "qa_pass").stage, "demo_review");
+});
+
+test("demo review accept finishes, changes loop to planner, cap commits", () => {
+  const review: Partial<RunState> = { stage: "demo_review", demoRound: 1 };
+  assert.equal(applyDemoReview(run(review), true).stage, "commit_message");
+  const loop = applyDemoReview(run(review), false, "button does nothing");
+  assert.equal(loop.stage, "planner");
+  assert.equal(loop.demoFeedback, "button does nothing");
+  assert.equal(
+    applyDemoReview(run({ ...review, demoRound: 2 }), false, "still broken").stage,
+    "commit_message",
+  );
+  assert.equal(applySkip(run(review)).stage, "commit_message");
 });
 
 test("skip at the leftover build-it gate starts implementation", () => {

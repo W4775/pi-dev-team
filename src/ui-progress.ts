@@ -25,6 +25,7 @@ const STAGE_LABELS: Record<Stage, string> = {
   commit_message: "commit",
   demo_opt_in: "demo",
   demo: "demo",
+  demo_review: "demo",
   done: "done",
   error: "error",
 };

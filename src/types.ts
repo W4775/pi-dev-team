@@ -47,6 +47,7 @@ export type Stage =
   | "fix_lint"
   | "demo_opt_in"
   | "demo"
+  | "demo_review"
   | "commit_message"
   | "done"
   | "error";
@@ -60,7 +61,8 @@ export type PauseReason =
   | "fix_review_max"
   | "fix_test_max"
   | "fix_lint_max"
-  | "demo_opt_in";
+  | "demo_opt_in"
+  | "demo_review";
 
 export type FindingAxis = "standards" | "spec";
 export type FindingSeverity = "block" | "note";
@@ -220,6 +222,8 @@ export type RunState = {
   demoPath?: string;
   demoVersion?: number;
   demoNotes?: string;
+  demoFeedback?: string;
+  demoRound?: number;
   designCritiqueNotes?: string;
   designRejectCount: number;
   databaseNotes?: string;
@@ -335,6 +339,7 @@ export const DEFAULT_DEMO_BASH = [
 
 export const MAX_FIX_ROUNDS = 3;
 export const MAX_DESIGN_REJECTS = 2;
+export const MAX_DEMO_ROUNDS = 2;
 export const MAX_SERVICES = 12;
 export const DEFAULT_MAX_TOOL_CALLS = 80;
 /** Implementors, reviewer, tester, and linter need room to read, edit, and re-check. */
