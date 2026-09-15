@@ -46,7 +46,14 @@ test("nextScoutWave waits while any scout is running", () => {
 
 test("compileScoutNotes prefers stored notes, else item findings", () => {
   const items = [
-    { id: "a", title: "UI", files: [], status: "done" as const, attempts: 1, findings: "settings live in src/app/settings" },
+    {
+      id: "a",
+      title: "UI",
+      files: [],
+      status: "done" as const,
+      attempts: 1,
+      findings: "settings live in src/app/settings",
+    },
   ];
   assert.match(compileScoutNotes(items), /src\/app\/settings/);
   assert.equal(compileScoutNotes(items, "already written"), "already written");

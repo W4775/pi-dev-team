@@ -23,7 +23,12 @@ function item(partial: Partial<WorkItem> & Pick<WorkItem, "id" | "layer" | "titl
 
 test("normalizeWorkItems fills ids, layers, and drops unknown dependsOn", () => {
   const items = normalizeWorkItems([
-    { title: "POST /od", layer: "backend", files: "services/api/routes/**", dependsOn: ["missing"] },
+    {
+      title: "POST /od",
+      layer: "backend",
+      files: "services/api/routes/**",
+      dependsOn: ["missing"],
+    },
     { id: "ui", layer: "frontend", files: ["src/app/**"] },
     { id: "ui", layer: "frontend", title: "duplicate id" },
   ]);
@@ -129,6 +134,7 @@ test("applyServiceDefaults fills files from the named service", () => {
       skills: [],
       test: [],
       lint: [],
+      serve: [],
       source: "detected",
     },
   ];

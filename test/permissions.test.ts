@@ -6,15 +6,31 @@ import { test } from "node:test";
 import { gateBash, gateWrite } from "../src/permissions.ts";
 
 test("non-implementors cannot write the repo", () => {
-  for (const role of ["planner", "designer", "plan_critic", "design_critic", "orchestrator", "planner_orchestrator", "scout", "reviewer", "tester", "linter", "commit_message"] as const) {
+  for (const role of [
+    "planner",
+    "designer",
+    "plan_critic",
+    "design_critic",
+    "orchestrator",
+    "planner_orchestrator",
+    "scout",
+    "reviewer",
+    "tester",
+    "linter",
+    "commit_message",
+  ] as const) {
     const gate = gateWrite(role, "/repo/src/app.ts", "/repo", undefined);
     assert.equal(gate.block, true);
   }
 });
 
 test("assignedPaths restrict a subagent to its work item", () => {
-  const allowed = gateWrite("backend", "/repo/src/api/route.ts", "/repo", undefined, undefined, ["src/api/**"]);
-  const blocked = gateWrite("backend", "/repo/src/other/x.ts", "/repo", undefined, undefined, ["src/api/**"]);
+  const allowed = gateWrite("backend", "/repo/src/api/route.ts", "/repo", undefined, undefined, [
+    "src/api/**",
+  ]);
+  const blocked = gateWrite("backend", "/repo/src/other/x.ts", "/repo", undefined, undefined, [
+    "src/api/**",
+  ]);
   assert.equal(allowed.block, false);
   assert.equal(blocked.block, true);
 });
@@ -80,9 +96,13 @@ test("a service-scoped backend cannot write another service's files", () => {
     skills: [],
     test: ["go test ./..."],
     lint: ["go vet ./..."],
+    serve: [],
     source: "detected" as const,
   };
-  assert.equal(gateWrite("backend", "/repo/services/api/main.go", "/repo", undefined, api).block, false);
+  assert.equal(
+    gateWrite("backend", "/repo/services/api/main.go", "/repo", undefined, api).block,
+    false,
+  );
   const blocked = gateWrite("backend", "/repo/services/scoring/app.py", "/repo", undefined, api);
   assert.equal(blocked.block, true);
   assert.match(blocked.block ? blocked.reason : "", /api service/);
@@ -99,6 +119,7 @@ test("tester may run a service's own test command", () => {
       skills: [],
       test: ["pytest"],
       lint: ["ruff check ."],
+      serve: [],
       source: "detected" as const,
     },
   ];

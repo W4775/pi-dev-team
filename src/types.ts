@@ -14,6 +14,7 @@ export const ISOLATED_ROLES = [
   "reviewer",
   "tester",
   "linter",
+  "demo",
   "commit_message",
 ] as const;
 export type IsolatedRole = (typeof ISOLATED_ROLES)[number];
@@ -44,6 +45,8 @@ export type Stage =
   | "fix_test"
   | "linter"
   | "fix_lint"
+  | "demo_opt_in"
+  | "demo"
   | "commit_message"
   | "done"
   | "error";
@@ -56,7 +59,8 @@ export type PauseReason =
   | "design_reject_max"
   | "fix_review_max"
   | "fix_test_max"
-  | "fix_lint_max";
+  | "fix_lint_max"
+  | "demo_opt_in";
 
 export type FindingAxis = "standards" | "spec";
 export type FindingSeverity = "block" | "note";
@@ -79,6 +83,7 @@ export type ServiceInfo = {
   skills: string[];
   test: string[];
   lint: string[];
+  serve: string[];
   source: "detected" | "config" | "merged";
 };
 
@@ -91,6 +96,7 @@ export type ServiceConfig = {
   skills?: string[];
   test?: string[];
   lint?: string[];
+  serve?: string[];
 };
 
 export type StackDetection = {
@@ -194,6 +200,7 @@ export type RunState = {
   scoutItems?: ScoutItem[];
   scoutNotes?: string;
   wantMockup?: boolean;
+  wantDemo?: boolean;
   stack?: StackDetection;
   resolvedSkills?: Record<string, ResolvedSkill[]>;
   spec?: string;
@@ -210,6 +217,9 @@ export type RunState = {
   designPlan?: string;
   mockupPath?: string;
   mockupVersion?: number;
+  demoPath?: string;
+  demoVersion?: number;
+  demoNotes?: string;
   designCritiqueNotes?: string;
   designRejectCount: number;
   databaseNotes?: string;
@@ -280,6 +290,7 @@ export type ProjectConfig = {
   bash?: {
     test?: string[];
     lint?: string[];
+    demo?: string[];
   };
   /** Abort a child after this many tool calls. 0 uses the role default (200 for implementors/reviewer, 40 for scouts, 80 otherwise). */
   maxToolCalls?: number;
@@ -310,6 +321,16 @@ export const DEFAULT_LINT_BASH = [
   "ruff",
   "cargo clippy",
   "dotnet format",
+];
+
+export const DEFAULT_DEMO_BASH = [
+  "npx playwright",
+  "playwright",
+  "xvfb-run",
+  "npm run dev",
+  "npm start",
+  "pnpm dev",
+  "pnpm start",
 ];
 
 export const MAX_FIX_ROUNDS = 3;

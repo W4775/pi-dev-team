@@ -34,3 +34,9 @@ Mockups live beside the job file:
 ```text
 ~/.omp/agent/devteam/runs/<session-id>/mockup/index.html
 ```
+
+Demo scripts and screenshots live next to them:
+
+```text
+~/.omp/agent/devteam/runs/<session-id>/demo/
+```

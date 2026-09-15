@@ -35,10 +35,7 @@ test("override ids win over detection", () => {
       throw new Error("should not fetch when override is empty");
     },
   });
-  assert.equal(
-    resolved.filter((s) => s.catalogId).length,
-    0,
-  );
+  assert.equal(resolved.filter((s) => s.catalogId).length, 0);
 });
 
 test("installed skill is preferred over fetch", () => {

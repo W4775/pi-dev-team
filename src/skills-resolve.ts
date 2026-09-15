@@ -1,8 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { Catalog, ProjectConfig, ResolvedSkill, ServiceInfo, SkillSource, StackDetection } from "./types.ts";
+import type {
+  Catalog,
+  ProjectConfig,
+  ResolvedSkill,
+  ServiceInfo,
+  SkillSource,
+  StackDetection,
+} from "./types.ts";
 import { stackIdsForLayer } from "./detect-stack.ts";
 
 export type ResolveOptions = {
@@ -126,7 +141,10 @@ function copyDir(src: string, dest: string) {
   }
 }
 
-function sourcesForIds(catalog: Catalog, ids: string[]): { catalogId: string; source: SkillSource }[] {
+function sourcesForIds(
+  catalog: Catalog,
+  ids: string[],
+): { catalogId: string; source: SkillSource }[] {
   const out: { catalogId: string; source: SkillSource }[] = [];
   for (const id of ids) {
     const entry = catalog.stacks.find((s) => s.id === id);
@@ -136,7 +154,10 @@ function sourcesForIds(catalog: Catalog, ids: string[]): { catalogId: string; so
   return out;
 }
 
-function overrideIds(config: ProjectConfig | undefined, layer: ResolveOptions["layer"]): string[] | undefined {
+function overrideIds(
+  config: ProjectConfig | undefined,
+  layer: ResolveOptions["layer"],
+): string[] | undefined {
   if (!config?.skills) return undefined;
   if (layer === "frontend") return config.skills.frontend;
   if (layer === "backend") return config.skills.backend;
@@ -161,7 +182,10 @@ export function resolveSkillsForLayer(opts: ResolveOptions): ResolvedSkill[] {
   const resolved: ResolvedSkill[] = [];
   const seen = new Set<string>();
 
-  const resolveOne = (catalogId: string | undefined, source: SkillSource | { name: string; abs: string }) => {
+  const resolveOne = (
+    catalogId: string | undefined,
+    source: SkillSource | { name: string; abs: string },
+  ) => {
     if ("abs" in source) {
       if (seen.has(source.abs)) return;
       seen.add(source.abs);

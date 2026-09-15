@@ -50,10 +50,7 @@ export function thisExtensionEntry(): string {
   return join(packageRoot(), "src", "index.ts");
 }
 
-export function workflowSkillsForRole(
-  role: string,
-  opts?: { diagnosing?: boolean },
-): string[] {
+export function workflowSkillsForRole(role: string, opts?: { diagnosing?: boolean }): string[] {
   switch (role) {
     case "planner":
       return ["grilling", "to-spec", "to-tickets", "codebase-design"];
@@ -69,7 +66,6 @@ export function workflowSkillsForRole(
     case "frontend":
     case "general":
       return opts?.diagnosing ? ["implement", "tdd", "diagnosing-bugs"] : ["implement", "tdd"];
-    case "orchestrator":
     case "planner_orchestrator":
       return ["codebase-design"];
     case "scout":

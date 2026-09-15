@@ -31,6 +31,8 @@ export function isToolCallEventType(name: string, event: { toolName?: string }):
 }
 
 export const withFileMutationQueue: typeof localWithFileMutationQueue =
-  typeof host.withFileMutationQueue === "function" ? host.withFileMutationQueue : localWithFileMutationQueue;
+  typeof host.withFileMutationQueue === "function"
+    ? host.withFileMutationQueue
+    : localWithFileMutationQueue;
 
 export const PROJECT_CONFIG_DIRS = [".omp", ".pi"] as const;

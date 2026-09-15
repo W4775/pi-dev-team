@@ -12,7 +12,12 @@ import {
   type ExtensionContext,
 } from "./pi-host.ts";
 import { onAgentIdle, projectTrusted, sessionIdFromContext } from "./host-compat.ts";
-import { loadCatalog, bundledSkillDir, thisExtensionEntry, workflowSkillsForRole } from "./catalog.ts";
+import {
+  loadCatalog,
+  bundledSkillDir,
+  thisExtensionEntry,
+  workflowSkillsForRole,
+} from "./catalog.ts";
 import { loadDevteamConfig } from "./config.ts";
 import { parseDevteamArgs } from "./command-args.ts";
 import { listJobs, loadJob, newJobId, renderJobList, resolveJobRef } from "./jobs.ts";
@@ -31,6 +36,7 @@ import { isMultiService, renderServices, serviceByName } from "./services.ts";
 import { captureGit } from "./git.ts";
 import { isolatedRoleFromFlag, gateBash, gateWrite, isWriteTool } from "./permissions.ts";
 import {
+  acceptDemoChoice,
   acceptMockupChoice,
   activeImplementLayer,
   activeRole,
@@ -76,7 +82,6 @@ import {
   runPaths,
   saveRun,
   STATE_SECTIONS,
-  workflowStatePaths,
 } from "./state.ts";
 import { applyHandoffTool, applyMockupTool, applyStateTool, type Store } from "./tools.ts";
 import type {
@@ -101,7 +106,15 @@ import {
   setItemStatus,
 } from "./work.ts";
 import { compileScoutNotes, findScout, nextScoutWave, setScoutStatus } from "./scout.ts";
-import { applyChrome, clearChrome, lifecycleText, postSessionLine, registerDevteamRenderers, tickProgressFeed, toolLogText } from "./ui-progress.ts";
+import {
+  applyChrome,
+  clearChrome,
+  lifecycleText,
+  postSessionLine,
+  registerDevteamRenderers,
+  tickProgressFeed,
+  toolLogText,
+} from "./ui-progress.ts";
 import { formatAskAnswers, promptQuestions, type AskQuestion } from "./ask-ui.ts";
 import { parseCritiqueItems } from "./critique.ts";
 
@@ -156,7 +169,8 @@ async function waitForIdleTimed(ctx: ExtensionContext, ms = 5000): Promise<void>
 }
 
 function openPath(filePath: string): void {
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   try {
     spawn(cmd, [filePath], { detached: true, stdio: "ignore" }).unref();
   } catch {
@@ -186,13 +200,16 @@ export default function (pi: ExtensionAPI) {
 
   const childRole = isolatedRoleFromFlag(pi.getFlag("devteam-role") ?? process.env.DEVTEAM_ROLE);
   const childStateRaw = pi.getFlag("devteam-state") ?? process.env.DEVTEAM_STATE;
-  const childStatePath = typeof childStateRaw === "string" && childStateRaw.length > 0 ? childStateRaw : undefined;
+  const childStatePath =
+    typeof childStateRaw === "string" && childStateRaw.length > 0 ? childStateRaw : undefined;
   const childServiceName =
-    (typeof pi.getFlag("devteam-service") === "string" ? pi.getFlag("devteam-service") : undefined) ??
-    process.env.DEVTEAM_SERVICE;
+    (typeof pi.getFlag("devteam-service") === "string"
+      ? pi.getFlag("devteam-service")
+      : undefined) ?? process.env.DEVTEAM_SERVICE;
   const childTaskId =
-    (typeof pi.getFlag("devteam-task") === "string" ? (pi.getFlag("devteam-task") as string) : undefined) ??
-    process.env.DEVTEAM_TASK;
+    (typeof pi.getFlag("devteam-task") === "string"
+      ? (pi.getFlag("devteam-task") as string)
+      : undefined) ?? process.env.DEVTEAM_TASK;
 
   let sessionId = "session";
   let jobId = "session";
@@ -218,6 +235,38 @@ export default function (pi: ExtensionAPI) {
     }
     childAborts.clear();
   }
+  function standDown(ctx?: ExtensionContext): void {
+    abortAllChildren();
+    resetDialogAbort();
+    childActivities.clear();
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      progressTimer = undefined;
+    }
+    if (ctx && !childRole) clearChrome(ctx);
+  }
+
+  function haltWorkflow(ctx: ExtensionContext, run: RunState): RunState {
+    standDown(ctx);
+    abortParentTurn(ctx);
+    applyParentTools(undefined);
+    return persist(applyStop(run));
+  }
+
+  function refreshUi(ctx: ExtensionContext, run: RunState | undefined) {
+    if (childRole) return;
+    if (
+      !run ||
+      run.stage === "idle" ||
+      run.stage === "done" ||
+      run.stage === "error" ||
+      run.halted
+    ) {
+      clearChrome(ctx);
+      return;
+    }
+    applyChrome(ctx, run, runningActivities());
+  }
 
   function abortParentTurn(ctx: ExtensionContext): void {
     try {
@@ -236,13 +285,6 @@ export default function (pi: ExtensionAPI) {
     dialogAbort = new AbortController();
   }
 
-  function haltWorkflow(ctx: ExtensionContext, run: RunState): RunState {
-    abortAllChildren();
-    abortParentTurn(ctx);
-    resetDialogAbort();
-    return persist(applyStop(run));
-  }
-
   function progressEveryMs(): number {
     const configured = Number(config?.progressEvery);
     if (Number.isFinite(configured)) {
@@ -257,7 +299,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function reportProgress(ctx: ExtensionContext, force = false): void {
-    applyChrome(ctx, store.load(), runningActivities());
+    refreshUi(ctx, store.load());
     const activities = runningActivities();
     if (!activities.length) return;
     const every = progressEveryMs();
@@ -400,31 +442,29 @@ export default function (pi: ExtensionAPI) {
     await advancePipeline(ctx, next);
   }
 
-  function refreshUi(ctx: ExtensionContext, run: RunState | undefined) {
-    if (childRole) return;
-    if (!run || run.stage === "idle") {
-      clearChrome(ctx);
-      return;
-    }
-    applyChrome(ctx, run, runningActivities());
-  }
-
   function logProgress(
     ctx: ExtensionContext,
-    event: { kind: "start" | "tool" | "finish" | "error" | "stage"; text: string; role?: string; stage?: string; label?: string },
+    event: {
+      kind: "start" | "tool" | "finish" | "error" | "stage";
+      text: string;
+      role?: string;
+      stage?: string;
+      label?: string;
+    },
     toast?: "info" | "warning" | "error",
   ) {
-    const streaming = typeof (ctx as { isIdle?: () => boolean }).isIdle === "function"
-      ? !(ctx as { isIdle: () => boolean }).isIdle()
-      : false;
+    const streaming =
+      typeof (ctx as { isIdle?: () => boolean }).isIdle === "function"
+        ? !(ctx as { isIdle: () => boolean }).isIdle()
+        : false;
     const posted = postSessionLine(pi, event, { streaming, sessionManager: ctx.sessionManager });
     if (toast === "error" || toast === "warning" || posted === "none") {
       notify(ctx, event.text, toast ?? "info");
     }
-    applyChrome(ctx, store.load(), runningActivities());
+    refreshUi(ctx, store.load());
   }
 
-  function currentRole(ctx: ExtensionContext): RoleName | undefined {
+  function currentRole(_ctx: ExtensionContext): RoleName | undefined {
     if (childRole) return childRole;
     const run = store.load();
     return run?.interactiveRole ?? activeRole(run ?? emptyRun(sessionId)) ?? run?.currentRole;
@@ -446,14 +486,32 @@ export default function (pi: ExtensionAPI) {
       pi.setActiveTools(intersect(all, PARENT_PLANNER_TOOLS));
       return;
     }
-    pi.setActiveTools(intersect(all, ["read", "grep", "find", "ls", "glob", "bash", "devteam_state"]));
+    pi.setActiveTools(
+      intersect(all, ["read", "grep", "find", "ls", "glob", "bash", "devteam_state"]),
+    );
   }
 
-  function skillDirsForRole(role: IsolatedRole, run: RunState, cwd: string, service?: ServiceInfo): string[] {
+  function skillDirsForRole(
+    role: IsolatedRole,
+    run: RunState,
+    cwd: string,
+    service?: ServiceInfo,
+  ): string[] {
     const diagnosing = run.stage === "fix_test";
-    const workflow = workflowSkillsForRole(role, { diagnosing }).map((name) => bundledSkillDir(name));
+    const workflow = workflowSkillsForRole(role, { diagnosing }).map((name) =>
+      bundledSkillDir(name),
+    );
     const layer = stackLayerForRole(role);
-    if (!layer || role === "linter" || role === "commit_message" || role === "plan_critic" || role === "design_critic" || role === "orchestrator" || role === "planner_orchestrator" || role === "scout") {
+    if (
+      !layer ||
+      role === "linter" ||
+      role === "commit_message" ||
+      role === "plan_critic" ||
+      role === "design_critic" ||
+      role === "orchestrator" ||
+      role === "planner_orchestrator" ||
+      role === "scout"
+    ) {
       return workflow.filter((dir) => dir.length > 0);
     }
     const detection = run.stack ?? detectStack(getCatalog(), { cwd, config: config ?? undefined });
@@ -468,7 +526,7 @@ export default function (pi: ExtensionAPI) {
     });
     mutateRun(statePath(), agentDirSafe(), (current) => ({
       ...current,
-      resolvedSkills: { ...(current.resolvedSkills ?? {}), [role]: resolved },
+      resolvedSkills: { ...current.resolvedSkills, [role]: resolved },
     }));
     const loaded = resolved.filter((skill) => skill.source !== "unresolved" && skill.dir);
     return [...workflow, ...loaded.map((skill) => skill.dir)];
@@ -488,7 +546,10 @@ Follow /skill:<name> together with TDD at agreed seams when implementing.
 Do not start a nested /devteam pipeline. Do not git commit.
 ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow}\n` : ""}
 `;
-    const file = join(dirname(statePath()), taskId ? `${role}.${taskId}.prompt.md` : `${role}.prompt.md`);
+    const file = join(
+      dirname(statePath()),
+      taskId ? `${role}.${taskId}.prompt.md` : `${role}.prompt.md`,
+    );
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, body);
     return file;
@@ -553,7 +614,9 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               ? `Spec already stored. Grill only remaining holes, then call devteam_handoff with plan_ready when the spec is complete.\n\n${run.spec.slice(0, 6000)}`
               : "No spec stored yet. Continue grilling from unanswered questions. Do not re-ask decisions already in devteam_state.",
             run.openQuestions ? `Open questions:\n${run.openQuestions}` : "",
-            run.scoutNotes?.trim() ? `Scout notes (facts about this repo):\n${run.scoutNotes.slice(0, 8000)}` : "",
+            run.scoutNotes?.trim()
+              ? `Scout notes (facts about this repo):\n${run.scoutNotes.slice(0, 8000)}`
+              : "",
             "First action: devteam_state with action get.",
           ]
             .filter(Boolean)
@@ -568,6 +631,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           "Scout notes are facts about this repo. Do not re-ask the user things they already answer. Name real files and types from those notes.",
           "Infer layersNeeded for THIS change only (database, backend, frontend, general) — omit layers with no work. Write a short briefing into that layer's notes; leave the others blank so those implementors are skipped. Also store uiSurface.",
           "If the user already said whether they want HTML mockups, store wantMockup.",
+          "If the user already said whether they want a live headed demo after QA, store wantDemo.",
           "When the spec is ready, call devteam_handoff with action plan_ready.",
           `Task:\n${run.task}`,
           run.scoutNotes?.trim() ? `Scout notes:\n${run.scoutNotes.slice(0, 8000)}` : "",
@@ -623,7 +687,12 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     role: IsolatedRole,
     assignment?: ChildAssignment,
   ): Promise<{ ok: boolean; error?: string }> {
-    const locked = persist({ ...run, pipelineLocked: true, currentRole: role, updatedAt: new Date().toISOString() });
+    const locked = persist({
+      ...run,
+      pipelineLocked: true,
+      currentRole: role,
+      updatedAt: new Date().toISOString(),
+    });
     refreshUi(ctx, locked);
     const services = locked.stack?.services ?? [];
     const service = serviceByName(services, assignment?.service ?? locked.currentService);
@@ -636,8 +705,14 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     const extras = (locked.resolvedSkills?.[role] ?? []) as ResolvedSkill[];
     const dirs = skillDirsForRole(role, locked, ctx.cwd, service);
     const latest = store.load() ?? locked;
-    const promptFile = writeRolePrompt(role, latest.resolvedSkills?.[role] ?? extras, assignment?.id);
-    const unresolved = (latest.resolvedSkills?.[role] ?? []).filter((skill) => skill.source === "unresolved");
+    const promptFile = writeRolePrompt(
+      role,
+      latest.resolvedSkills?.[role] ?? extras,
+      assignment?.id,
+    );
+    const unresolved = (latest.resolvedSkills?.[role] ?? []).filter(
+      (skill) => skill.source === "unresolved",
+    );
     if (unresolved.length && ctx.hasUI) {
       ctx.ui.notify(
         `Stack skill fallback: ${unresolved.map((skill) => skill.name).join(", ")}. Continuing with workflow skills.`,
@@ -660,7 +735,16 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       trusted: projectTrusted(ctx),
       serviceName: service?.name,
       taskId: assignment?.id,
-      prompt: childUserPrompt(role, latest.task, dirs, service, services, assignment, budget, scope),
+      prompt: childUserPrompt(
+        role,
+        latest.task,
+        dirs,
+        service,
+        services,
+        assignment,
+        budget,
+        scope,
+      ),
     });
     const activityKey = assignment?.id ?? role;
     const activity: ChildActivity = {
@@ -690,7 +774,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       const spawned = spawnPiChild({
         args,
         cwd: ctx.cwd,
-        env: childProcessEnv(role, statePath(), process.env, { serviceName: service?.name, taskId: assignment?.id }),
+        env: childProcessEnv(role, statePath(), process.env, {
+          serviceName: service?.name,
+          taskId: assignment?.id,
+        }),
         onOutput: () => {
           activity.lastEventAt = Date.now();
         },
@@ -698,14 +785,16 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           if (update.kind === "tool") {
             activity.toolCalls += 1;
             activity.recentTools.push(update.label);
-            if (activity.recentTools.length > 40) activity.recentTools.splice(0, activity.recentTools.length - 40);
+            if (activity.recentTools.length > 40)
+              activity.recentTools.splice(0, activity.recentTools.length - 40);
             if (repeatLimit && isRepeatedToolLoop(activity.recentTools, repeatLimit)) {
               abortReason = `${label} repeated ${repeatLimit} identical tool calls and was stopped.`;
               stopChild();
               return;
             }
           }
-          const shouldPost = update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
+          const shouldPost =
+            update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
           activity.label = update.label;
           activity.lastEventAt = Date.now();
           if (shouldPost) {
@@ -716,7 +805,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               text: toolLogText(activity.role, update.label),
             });
           } else {
-            applyChrome(ctx, store.load(), runningActivities());
+            refreshUi(ctx, store.load());
           }
           if (activity.toolCalls >= budget) {
             abortReason = `${label} hit the ${budget} tool-call budget and was stopped.`;
@@ -746,7 +835,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       const retryArgs = adaptArgsForUnknownFlags(args, unknown);
       if (retryArgs.join("\u0000") === args.join("\u0000")) break;
       args = retryArgs;
-      notify(ctx, `devteam: host rejected ${unknown.join(", ")}; retrying ${label} without them.`, "warning");
+      notify(
+        ctx,
+        `devteam: host rejected ${unknown.join(", ")}; retrying ${label} without them.`,
+        "warning",
+      );
       result = await runChild();
     }
 
@@ -774,7 +867,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       if (assignment?.list === "scout") {
         mutateRun(statePath(), agentDirSafe(), (current) => ({
           ...current,
-          scoutItems: setScoutStatus(current.scoutItems, assignment.id, { status: "failed", error }),
+          scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
+            status: "failed",
+            error,
+          }),
           lastError: error,
           pipelineLocked: false,
         }));
@@ -788,7 +884,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       } else {
         persist({ ...next, pipelineLocked: false, lastError: error, currentRole: role });
       }
-      logProgress(ctx, { kind: "error", role: activity.role, text: `${label} failed: ${error}` }, "error");
+      logProgress(
+        ctx,
+        { kind: "error", role: activity.role, text: `${label} failed: ${error}` },
+        "error",
+      );
       return { ok: false, error };
     };
 
@@ -797,14 +897,20 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     }
 
     if (activity.toolCalls >= budget && result.code !== 0) {
-      return failItem(`${label} exceeded ${budget} tool calls after ${elapsed} (${activity.label || "last action unknown"}).`);
+      return failItem(
+        `${label} exceeded ${budget} tool calls after ${elapsed} (${activity.label || "last action unknown"}).`,
+      );
     }
 
     if (result.code !== 0 && !next.pendingHandoff) {
       const error = formatChildFailure(role, result, args);
       if (assignment) return failItem(`${label} failed: ${error}`);
       persist({ ...next, pipelineLocked: false, lastError: error, currentRole: role });
-      logProgress(ctx, { kind: "error", role: activity.role, text: `${label} failed. ${error}` }, "error");
+      logProgress(
+        ctx,
+        { kind: "error", role: activity.role, text: `${label} failed. ${error}` },
+        "error",
+      );
       return { ok: false, error };
     }
 
@@ -819,7 +925,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     if (assignment) {
       const doneAction = assignment.list === "scout" ? "scout_done" : "implementor_done";
       if (after.pendingHandoff?.action === doneAction) {
-        mutateRun(statePath(), agentDirSafe(), (current) => ({ ...current, pendingHandoff: undefined }));
+        mutateRun(statePath(), agentDirSafe(), (current) => ({
+          ...current,
+          pendingHandoff: undefined,
+        }));
       }
       if (assignment.list === "scout") {
         const item = findScout(store.load()?.scoutItems, assignment.id);
@@ -868,7 +977,9 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       ...run,
       pipelineLocked: true,
       workItems: (run.workItems ?? []).map((item) =>
-        ids.has(item.id) ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined } : item,
+        ids.has(item.id)
+          ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined }
+          : item,
       ),
     });
     await Promise.all(
@@ -912,7 +1023,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
                 ...current,
                 lastError: wave.length
                   ? undefined
-                  : (current.lastError ?? "Work items were blocked; continuing to review this layer."),
+                  : (current.lastError ??
+                    "Work items were blocked; continuing to review this layer."),
               },
               layer,
             ),
@@ -924,17 +1036,24 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       }
     } finally {
       const current = store.load();
-      if (current?.pipelineLocked && !current.halted) persist({ ...current, pipelineLocked: false });
+      if (current?.pipelineLocked && !current.halted)
+        persist({ ...current, pipelineLocked: false });
     }
   }
 
-  async function runScoutWave(ctx: ExtensionContext, run: RunState, wave: NonNullable<RunState["scoutItems"]>): Promise<void> {
+  async function runScoutWave(
+    ctx: ExtensionContext,
+    run: RunState,
+    wave: NonNullable<RunState["scoutItems"]>,
+  ): Promise<void> {
     const ids = new Set(wave.map((item) => item.id));
     persist({
       ...run,
       pipelineLocked: true,
       scoutItems: (run.scoutItems ?? []).map((item) =>
-        ids.has(item.id) ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined } : item,
+        ids.has(item.id)
+          ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined }
+          : item,
       ),
     });
     await Promise.all(
@@ -985,7 +1104,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     }
   }
 
-  async function presentPlanReview(ctx: ExtensionContext, run: RunState): Promise<RunState | undefined> {
+  async function presentPlanReview(
+    ctx: ExtensionContext,
+    run: RunState,
+  ): Promise<RunState | undefined> {
     const items = run.planCritique?.items?.length
       ? run.planCritique.items
       : parseCritiqueItems(run.planCritique?.notes);
@@ -1015,7 +1137,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         );
       }
       haltWorkflow(ctx, latest);
-      notify(ctx, "Stopped at plan review. /devteam continue to review again, or /devteam skip to keep the spec.", "warning");
+      notify(
+        ctx,
+        "Stopped at plan review. /devteam continue to review again, or /devteam skip to keep the spec.",
+        "warning",
+      );
       return undefined;
     }
 
@@ -1047,9 +1173,12 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       for (;;) {
         if (run.halted) {
           persist({ ...run, pipelineLocked: false });
-          refreshUi(ctx, run);
-          applyParentTools(run);
-          notify(ctx, `Stopped at ${run.stage}. /devteam continue resumes this step; /devteam skip skips it.`);
+          standDown(ctx);
+          applyParentTools(undefined);
+          notify(
+            ctx,
+            `Stopped at ${run.stage}. /devteam continue resumes this step; /devteam skip skips it.`,
+          );
           return;
         }
 
@@ -1058,7 +1187,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         }
 
         if (run.stage === "done") {
-          refreshUi(ctx, run);
+          standDown(ctx);
           applyParentTools(run);
           if (ctx.hasUI) {
             ctx.ui.notify(
@@ -1072,7 +1201,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         }
 
         if (run.stage === "error") {
-          refreshUi(ctx, run);
+          standDown(ctx);
+          applyParentTools(run);
           return;
         }
 
@@ -1091,7 +1221,19 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
 
         if (needsParentKick(run.stage)) {
           persist(run);
-          await kickParent(ctx, run, { resume: Boolean(run.spec?.trim() || run.planCritique?.reviewed) });
+          await kickParent(ctx, run, {
+            resume: Boolean(run.spec?.trim() || run.planCritique?.reviewed),
+          });
+          return;
+        }
+        if (run.stage === "demo_opt_in") {
+          persist(run);
+          applyParentTools(run);
+          refreshUi(ctx, run);
+          notify(
+            ctx,
+            "QA passed. Want a live headed demo of the change? Answer yes or no, or /devteam skip to finish without one.",
+          );
           return;
         }
 
@@ -1114,7 +1256,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               if (run.stage === "implement") {
                 applyParentTools(run);
                 refreshUi(ctx, run);
-                notify(ctx, run.lastError ?? "devteam: implementation stalled. /devteam status for details.", "warning");
+                notify(
+                  ctx,
+                  run.lastError ?? "devteam: implementation stalled. /devteam status for details.",
+                  "warning",
+                );
                 return;
               }
               continue;
@@ -1125,7 +1271,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
 
           const role = activeRole(run);
           if (!role || role === "planner" || role === "designer") {
-            persist({ ...run, lastError: `No isolated role for stage ${run.stage}`, stage: "error" });
+            persist({
+              ...run,
+              lastError: `No isolated role for stage ${run.stage}`,
+              stage: "error",
+            });
             return;
           }
           await spawnRole(ctx, run, role);
@@ -1150,7 +1300,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               continue;
             }
             if (ctx.hasUI) {
-              ctx.ui.notify(`devteam: ${role} finished without a handoff. Check /devteam status.`, "warning");
+              ctx.ui.notify(
+                `devteam: ${role} finished without a handoff. Check /devteam status.`,
+                "warning",
+              );
             }
             return;
           }
@@ -1170,13 +1323,20 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     if (!ctx) return;
     queueMicrotask(() => {
       const latest = store.load();
-      if (childRole || latest?.halted || !latest?.pendingHandoff || latest.pipelineLocked || advancing) return;
+      if (
+        childRole ||
+        latest?.halted ||
+        !latest?.pendingHandoff ||
+        latest.pipelineLocked ||
+        advancing
+      )
+        return;
       void advancePipeline(ctx, latest);
     });
   }
 
   async function startTask(ctx: ExtensionContext, task: string) {
-    abortAllChildren();
+    standDown(ctx);
     const taken = jobsInAgent().map((job) => job.jobId);
     jobId = newJobId(taken);
     const git = captureGit(ctx.cwd);
@@ -1195,7 +1355,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       text: "Scouting the repo. The planner will ask questions after that.",
     });
     if (git.dirty && ctx.hasUI) {
-      ctx.ui.notify("Working tree was dirty at start. Reviewer will diff against HEAD anyway.", "warning");
+      ctx.ui.notify(
+        "Working tree was dirty at start. Reviewer will diff against HEAD anyway.",
+        "warning",
+      );
     }
     try {
       pi.setSessionName(task.slice(0, 72));
@@ -1208,7 +1371,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   pi.registerTool({
     name: "devteam_state",
     label: "Devteam state",
-    description: "Read or update the current /devteam run notebook stored in the Pi agent directory.",
+    description:
+      "Read or update the current /devteam run notebook stored in the Pi agent directory.",
     promptSnippet: "Get or update /devteam run-state sections",
     promptGuidelines: [
       "Use devteam_state to persist specs, tickets, notes, and findings. Never write workflow files into the user repository.",
@@ -1218,7 +1382,11 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       section: Type.Optional(
         Type.String({ description: `Section to update. One of: ${STATE_SECTIONS.join(", ")}` }),
       ),
-      value: Type.Optional(Type.String({ description: "Replacement or appended text (JSON allowed for some sections)" })),
+      value: Type.Optional(
+        Type.String({
+          description: "Replacement or appended text (JSON allowed for some sections)",
+        }),
+      ),
     }),
     async execute(_id, params) {
       const result = applyStateTool(store, params);
@@ -1230,7 +1398,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   pi.registerTool({
     name: "devteam_ask",
     label: "Devteam ask",
-    description: "Ask the user a round of grilling questions as selectable options. The UI adds Other so they can type a custom answer.",
+    description:
+      "Ask the user a round of grilling questions as selectable options. The UI adds Other so they can type a custom answer.",
     promptSnippet: "Ask the user grilling questions with selectable options",
     promptGuidelines: [
       "Use devteam_ask (or the host ask tool) for grilling. Never ask the user to type q1:1. Do not add an Other option; the UI adds it.",
@@ -1240,8 +1409,12 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         Type.Object({
           id: Type.String({ description: "Stable id, e.g. q1" }),
           question: Type.String(),
-          options: Type.Array(Type.String(), { description: "2-5 short labels. Do not include Other." }),
-          recommended: Type.Optional(Type.Number({ description: "0-based index of the recommended option" })),
+          options: Type.Array(Type.String(), {
+            description: "2-5 short labels. Do not include Other.",
+          }),
+          recommended: Type.Optional(
+            Type.Number({ description: "0-based index of the recommended option" }),
+          ),
         }),
       ),
     }),
@@ -1263,7 +1436,9 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       if (!answers) {
         const ui = ctx.ui as { select?: unknown; askDialog?: unknown } | undefined;
         if (!ui?.select && !ui?.askDialog) {
-          throw new Error("No option picker on this host. Ask in chat with numbered options, and say they can type a custom answer.");
+          throw new Error(
+            "No option picker on this host. Ask in chat with numbered options, and say they can type a custom answer.",
+          );
         }
         throw new Error("User cancelled the question.");
       }
@@ -1277,7 +1452,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     description: "Advance the /devteam pipeline when the current role is finished.",
     promptSnippet: "Finish this role and advance the /devteam pipeline",
     promptGuidelines: [
-        "Use devteam_handoff when the current role's work is complete. Pass action plan_ready, critic_approve, critic_revise, design_ready, scout_planned, scout_done, work_planned, implementor_done, qa_pass, qa_fail, or commit_drafted.",
+      "Use devteam_handoff when the current role's work is complete. Pass action plan_ready, critic_approve, critic_revise, design_ready, scout_planned, scout_done, work_planned, implementor_done, qa_pass, qa_fail, or commit_drafted.",
     ],
     parameters: Type.Object({
       action: StringEnum(HANDOFF_ACTIONS),
@@ -1287,24 +1462,34 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       const result = applyHandoffTool(store, params);
       if (result.isError) throw new Error(result.text);
       if (!childRole && ctx) queuePipelineAdvance(ctx);
-      return { content: [{ type: "text" as const, text: result.text }], terminate: result.terminate };
+      return {
+        content: [{ type: "text" as const, text: result.text }],
+        terminate: result.terminate,
+      };
     },
   });
 
   pi.registerTool({
     name: "devteam_mockup",
     label: "Devteam mockup",
-    description: "Read or write the HTML mockup for the current /devteam run. Files live next to run state, not in the repo.",
+    description:
+      "Read or write the HTML mockup for the current /devteam run. Files live next to run state, not in the repo.",
     promptSnippet: "Read or write the /devteam HTML mockup",
     promptGuidelines: [
       "Use devteam_mockup to write self-contained HTML mockups. Do not write mockups into the user working tree.",
     ],
     parameters: Type.Object({
       action: StringEnum(["read", "write", "path"] as const),
-      content: Type.Optional(Type.String({ description: "HTML (or CSS/JS) file contents for write" })),
-      file: Type.Optional(Type.String({ description: "Relative file inside the mockup directory. Default index.html" })),
+      content: Type.Optional(
+        Type.String({ description: "HTML (or CSS/JS) file contents for write" }),
+      ),
+      file: Type.Optional(
+        Type.String({
+          description: "Relative file inside the mockup directory. Default index.html",
+        }),
+      ),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, _onUpdate, _ctx) {
       if (params.action === "write") {
         const paths = runPaths(agentDirSafe(), sessionId);
         const rel = params.file?.replaceAll("\\", "/").replace(/^\/+/, "") || "index.html";
@@ -1324,10 +1509,12 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   pi.registerCommand("devteam", {
     description: "Run the /devteam coding workflow (planner, optional mockups, implementors)",
     getArgumentCompletions: (prefix: string) => {
-      const items = ["continue", "list", "status", "stop", "clear", "mockup", "skip"].map((value) => ({
-        value,
-        label: value,
-      }));
+      const items = ["continue", "list", "status", "stop", "clear", "mockup", "skip"].map(
+        (value) => ({
+          value,
+          label: value,
+        }),
+      );
       const p = prefix.trim().toLowerCase();
       return p ? items.filter((item) => item.value.startsWith(p)) : items;
     },
@@ -1339,157 +1526,167 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       try {
         await waitForIdleTimed(ctx);
 
-      const { trimmed, sub, rest: restText } = parseDevteamArgs(args);
+        const { trimmed, sub, rest: restText } = parseDevteamArgs(args);
 
-      if (!trimmed) {
-        const run = store.load();
-        notify(
-          ctx,
-          run && run.stage !== "idle"
-            ? `devteam is at ${run.stage}. Try /devteam status.`
-            : "Usage: /devteam <task> | continue | status | mockup | skip | stop | clear",
-        );
-        return;
-      }
-
-      if (sub === "list" && !restText) {
-        await showJobList(ctx);
-        return;
-      }
-
-      if (sub === "status") {
-        const run = store.load();
-        let text = "No active /devteam run.";
-        if (run) {
-          try {
-            const paths = runPaths(agentDirSafe(), sessionId);
-            text = renderRunMarkdown(run, {
-              canonicalPath: paths.json,
-              aliasPath: paths.workflowStateJson,
-            });
-          } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            text = `devteam: status render failed: ${detail}\n\n${JSON.stringify(run, null, 2).slice(0, 4000)}`;
-          }
-        }
-        if (ctx.hasUI) ctx.ui.notify(text, "info");
-        return;
-      }
-
-      if (sub === "clear") {
-        abortAllChildren();
-        clearRunFiles(agentDirSafe(), jobId);
-        persist(emptyRun(sessionId, "", jobId));
-        applyParentTools(store.load());
-        refreshUi(ctx, undefined);
-        if (ctx.hasUI) ctx.ui.notify("Cleared /devteam run state.", "info");
-        return;
-      }
-
-      if (sub === "stop") {
-        const run = store.load();
-        abortAllChildren();
-        abortParentTurn(ctx);
-        resetDialogAbort();
-        if (!run || run.stage === "idle") {
-          if (ctx.hasUI) ctx.ui.notify("No /devteam run to stop.", "warning");
-          return;
-        }
-        persist(applyStop(run));
-        refreshUi(ctx, store.load());
-        notify(ctx, `Stopped ${run.stage}. /devteam continue resumes this step; /devteam skip skips it.`);
-        return;
-      }
-
-      if (sub === "mockup") {
-        const run = store.load();
-        const path = run?.mockupPath ?? runPaths(agentDirSafe(), sessionId).mockupFile;
-        if (!run?.mockupPath) {
-          if (ctx.hasUI) ctx.ui.notify("No mockup yet. Opt in after planning, then wait for the designer.", "info");
-          return;
-        }
-        if (ctx.hasUI) ctx.ui.notify(`Mockup: ${path}`, "info");
-        openPath(path);
-        return;
-      }
-
-      const run = store.load();
-
-      if (sub === "continue" && restText.toLowerCase() === "list") {
-        await showJobList(ctx);
-        return;
-      }
-
-      if ((sub === "continue" || sub === "resume") && restText && restText.toLowerCase() !== "list") {
-        if (run?.pipelineLocked || advancing) {
-          notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
-          return;
-        }
-        await resumeJob(ctx, restText);
-        return;
-      }
-
-      if (sub === "continue" && !restText) {
-        if (!run || run.stage === "idle") {
-          notify(ctx, "No /devteam run to continue.", "warning");
-          return;
-        }
-        if (run.pipelineLocked || advancing) {
-          notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
-          return;
-        }
-        const next = applyContinue(run);
-        if (next === run) {
-          notify(ctx, continueHint(run), "warning");
-          return;
-        }
-        persist(next);
-        notify(ctx, `Continuing: ${run.stage} → ${next.stage}.`);
-        await advancePipeline(ctx, next);
-        return;
-      }
-
-      if (sub === "skip" && !restText) {
-        if (!run || run.stage === "idle") {
-          if (ctx.hasUI) ctx.ui.notify("No /devteam run to skip.", "warning");
-          return;
-        }
-        abortAllChildren();
-        abortParentTurn(ctx);
-        resetDialogAbort();
-        const latest = store.load() ?? run;
-        const unlocked = { ...latest, pipelineLocked: false, pendingHandoff: undefined };
-        const next = applySkip(unlocked);
-        if (
-          next.stage === run.stage &&
-          next.pauseReason === run.pauseReason &&
-          next.spec === run.spec &&
-          next.wantMockup === run.wantMockup
-        ) {
-          persist(next);
+        if (!trimmed) {
+          const run = store.load();
           notify(
             ctx,
-            run.halted
-              ? "Nothing to skip. /devteam continue resumes this step."
-              : "Nothing to skip at this stage.",
+            run && run.stage !== "idle"
+              ? `devteam is at ${run.stage}. Try /devteam status.`
+              : "Usage: /devteam <task> | continue | status | mockup | skip | stop | clear",
           );
           return;
         }
-        persist(next);
-        notify(ctx, `Skipping: ${run.stage} → ${next.stage}.`);
-        if (advancing) return;
-        await advancePipeline(ctx, next);
-        return;
-      }
 
-      const task = trimmed;
-      if (run?.pipelineLocked) {
-        notify(ctx, "devteam is busy. /devteam stop first, or wait.", "warning");
-        return;
-      }
-      await startTask(ctx, task);
+        if (sub === "list" && !restText) {
+          await showJobList(ctx);
+          return;
+        }
+
+        if (sub === "status") {
+          const run = store.load();
+          let text = "No active /devteam run.";
+          if (run) {
+            try {
+              const paths = runPaths(agentDirSafe(), sessionId);
+              text = renderRunMarkdown(run, {
+                canonicalPath: paths.json,
+                aliasPath: paths.workflowStateJson,
+              });
+            } catch (err) {
+              const detail = err instanceof Error ? err.message : String(err);
+              text = `devteam: status render failed: ${detail}\n\n${JSON.stringify(run, null, 2).slice(0, 4000)}`;
+            }
+          }
+          if (ctx.hasUI) ctx.ui.notify(text, "info");
+          return;
+        }
+
+        if (sub === "clear") {
+          standDown(ctx);
+          clearRunFiles(agentDirSafe(), jobId);
+          persist(emptyRun(sessionId, "", jobId));
+          applyParentTools(store.load());
+          if (ctx.hasUI) ctx.ui.notify("Cleared /devteam run state.", "info");
+          return;
+        }
+
+        if (sub === "stop") {
+          const run = store.load();
+          standDown(ctx);
+          abortParentTurn(ctx);
+          if (!run || run.stage === "idle") {
+            if (ctx.hasUI) ctx.ui.notify("No /devteam run to stop.", "warning");
+            return;
+          }
+          persist(applyStop(run));
+          applyParentTools(undefined);
+          return;
+        }
+
+        if (sub === "mockup") {
+          const run = store.load();
+          const path = run?.mockupPath ?? runPaths(agentDirSafe(), sessionId).mockupFile;
+          if (!run?.mockupPath) {
+            if (ctx.hasUI)
+              ctx.ui.notify(
+                "No mockup yet. Opt in after planning, then wait for the designer.",
+                "info",
+              );
+            return;
+          }
+          if (ctx.hasUI) ctx.ui.notify(`Mockup: ${path}`, "info");
+          openPath(path);
+          return;
+        }
+
+        const run = store.load();
+
+        if (sub === "continue" && restText.toLowerCase() === "list") {
+          await showJobList(ctx);
+          return;
+        }
+
+        if (
+          (sub === "continue" || sub === "resume") &&
+          restText &&
+          restText.toLowerCase() !== "list"
+        ) {
+          if (run?.pipelineLocked || advancing) {
+            notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
+            return;
+          }
+          await resumeJob(ctx, restText);
+          return;
+        }
+
+        if (sub === "continue" && !restText) {
+          if (!run || run.stage === "idle") {
+            notify(ctx, "No /devteam run to continue.", "warning");
+            return;
+          }
+          if (run.pipelineLocked || advancing) {
+            notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
+            return;
+          }
+          const next = applyContinue(run);
+          if (next === run) {
+            notify(ctx, continueHint(run), "warning");
+            return;
+          }
+          persist(next);
+          notify(ctx, `Continuing: ${run.stage} → ${next.stage}.`);
+          await advancePipeline(ctx, next);
+          return;
+        }
+
+        if (sub === "skip" && !restText) {
+          if (!run || run.stage === "idle") {
+            if (ctx.hasUI) ctx.ui.notify("No /devteam run to skip.", "warning");
+            return;
+          }
+          abortAllChildren();
+          abortParentTurn(ctx);
+          resetDialogAbort();
+          const latest = store.load() ?? run;
+          const unlocked = { ...latest, pipelineLocked: false, pendingHandoff: undefined };
+          const next = applySkip(unlocked);
+          if (
+            next.stage === run.stage &&
+            next.pauseReason === run.pauseReason &&
+            next.spec === run.spec &&
+            next.wantMockup === run.wantMockup &&
+            next.wantDemo === run.wantDemo
+          ) {
+            persist(next);
+            notify(
+              ctx,
+              run.halted
+                ? "Nothing to skip. /devteam continue resumes this step."
+                : "Nothing to skip at this stage.",
+            );
+            return;
+          }
+          persist(next);
+          notify(ctx, `Skipping: ${run.stage} → ${next.stage}.`);
+          if (advancing) return;
+          await advancePipeline(ctx, next);
+          return;
+        }
+
+        const task = trimmed;
+        if (run?.pipelineLocked) {
+          notify(ctx, "devteam is busy. /devteam stop first, or wait.", "warning");
+          return;
+        }
+        await startTask(ctx, task);
       } catch (err) {
-        notify(ctx, `devteam command failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        notify(
+          ctx,
+          `devteam command failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
       }
     },
   });
@@ -1522,7 +1719,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   });
 
   pi.on("session_shutdown", () => {
-    abortAllChildren();
+    standDown();
     abortChild = undefined;
   });
 
@@ -1541,9 +1738,18 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       });
       return { action: "handled" as const };
     }
+    if (run.stage === "demo_opt_in") {
+      const answer = parseYesNo(event.text);
+      if (answer === null) return;
+      const next = persist(acceptDemoChoice(run, answer));
+      queueMicrotask(() => {
+        void advancePipeline(ctx, next);
+      });
+      return { action: "handled" as const };
+    }
   });
 
-  pi.on("before_agent_start", (event, ctx) => {
+  pi.on("before_agent_start", (event, _ctx) => {
     const run = store.load();
     const role = childRole ?? run?.interactiveRole;
     applyParentTools(run);
@@ -1570,14 +1776,34 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     }
     const role = currentRole(ctx);
     const current = store.load();
-    const service = serviceByName(current?.stack?.services, childServiceName ?? current?.currentService);
-    const assigned = childRole === "scout" ? undefined : findItem(current?.workItems, childTaskId)?.files;
-    if (isWriteTool(event.toolName) && "path" in event.input && typeof event.input.path === "string") {
-      const gate = gateWrite(role, event.input.path, ctx.cwd, config ?? undefined, service, assigned);
+    const service = serviceByName(
+      current?.stack?.services,
+      childServiceName ?? current?.currentService,
+    );
+    const assigned =
+      childRole === "scout" ? undefined : findItem(current?.workItems, childTaskId)?.files;
+    if (
+      isWriteTool(event.toolName) &&
+      "path" in event.input &&
+      typeof event.input.path === "string"
+    ) {
+      const gate = gateWrite(
+        role,
+        event.input.path,
+        ctx.cwd,
+        config ?? undefined,
+        service,
+        assigned,
+      );
       if (gate.block) return { block: true, reason: gate.reason };
     }
     if (isToolCallEventType("bash", event)) {
-      const gate = gateBash(role, event.input.command, config ?? undefined, current?.stack?.services);
+      const gate = gateBash(
+        role,
+        event.input.command,
+        config ?? undefined,
+        current?.stack?.services,
+      );
       if (gate.block) return { block: true, reason: gate.reason };
     }
   });

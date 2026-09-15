@@ -1,7 +1,14 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { detectServices, mergeServices } from "./services.ts";
-import type { Catalog, ProjectConfig, ServiceInfo, StackDetection, StackEntry, UiSurface } from "./types.ts";
+import type {
+  Catalog,
+  ProjectConfig,
+  ServiceInfo,
+  StackDetection,
+  StackEntry,
+  UiSurface,
+} from "./types.ts";
 
 export type DetectInput = {
   cwd: string;
@@ -20,7 +27,8 @@ function walkFiles(dir: string, maxFiles = 4000, prefix = ""): string[] {
     return out;
   }
   for (const name of entries) {
-    if (name === "node_modules" || name === ".git" || name === "dist" || name === "coverage") continue;
+    if (name === "node_modules" || name === ".git" || name === "dist" || name === "coverage")
+      continue;
     const abs = join(dir, name);
     const rel = prefix ? `${prefix}/${name}` : name;
     let st;
@@ -52,7 +60,12 @@ export function collectNpmDeps(packageJsonText: string): Set<string> {
   const deps = new Set<string>();
   try {
     const json = JSON.parse(packageJsonText) as Record<string, unknown>;
-    for (const key of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+    for (const key of [
+      "dependencies",
+      "devDependencies",
+      "peerDependencies",
+      "optionalDependencies",
+    ]) {
       const block = json[key];
       if (block && typeof block === "object") {
         for (const name of Object.keys(block as Record<string, string>)) deps.add(name);
@@ -73,7 +86,9 @@ function fileMatchesPattern(files: string[], pattern: string): boolean {
 }
 
 function anyCsprojContains(cwd: string, files: string[], needles: string[]): boolean {
-  const csproj = files.filter((f) => f.endsWith(".csproj") || f.endsWith(".fsproj") || f.endsWith(".vbproj"));
+  const csproj = files.filter(
+    (f) => f.endsWith(".csproj") || f.endsWith(".fsproj") || f.endsWith(".vbproj"),
+  );
   for (const f of csproj) {
     const text = readIfExists(join(cwd, f));
     if (!text) continue;
@@ -119,9 +134,11 @@ export function entryMatches(
   const checks: boolean[] = [];
   if (m.deps?.length) checks.push(m.deps.some((d) => ctx.deps.has(d)));
   if (m.files?.length) checks.push(m.files.some((p) => fileMatchesPattern(ctx.files, p)));
-  if (m.csprojContains?.length) checks.push(anyCsprojContains(ctx.cwd, ctx.files, m.csprojContains));
+  if (m.csprojContains?.length)
+    checks.push(anyCsprojContains(ctx.cwd, ctx.files, m.csprojContains));
   if (m.prismaProvider === "postgresql") checks.push(prismaIsPostgres(ctx.cwd, ctx.files));
-  if (m.envContains?.length) checks.push(m.envContains.some((s) => ctx.envText.toLowerCase().includes(s.toLowerCase())));
+  if (m.envContains?.length)
+    checks.push(m.envContains.some((s) => ctx.envText.toLowerCase().includes(s.toLowerCase())));
   if (m.composeImages?.length) {
     checks.push(m.composeImages.includes("postgres") && composeHasPostgres(ctx.cwd, ctx.files));
   }
@@ -148,7 +165,9 @@ export function detectStack(catalog: Catalog, input: DetectInput): StackDetectio
   const deps = collectNpmDeps(pkg);
   const envText =
     input.envText ??
-    [readIfExists(join(input.cwd, ".env.example")), readIfExists(join(input.cwd, ".env"))].filter(Boolean).join("\n");
+    [readIfExists(join(input.cwd, ".env.example")), readIfExists(join(input.cwd, ".env"))]
+      .filter(Boolean)
+      .join("\n");
 
   const ctx = {
     deps,

@@ -10,7 +10,12 @@ import {
 
 test("a polyglot tree yields one service per manifest", () => {
   const services = detectServices({
-    files: ["services/api/go.mod", "services/api/main.go", "services/scoring/pyproject.toml", "services/scoring/app.py"],
+    files: [
+      "services/api/go.mod",
+      "services/api/main.go",
+      "services/scoring/pyproject.toml",
+      "services/scoring/app.py",
+    ],
   });
   assert.equal(services.length, 2);
   const api = serviceByName(services, "api");
@@ -52,4 +57,19 @@ test("two backend services become a queue", () => {
     files: ["api/go.mod", "scoring/pyproject.toml"],
   });
   assert.deepEqual(serviceQueueForLayer(services, "backend").sort(), ["api", "scoring"]);
+});
+
+test("dev script becomes the serve command, config overrides", () => {
+  const services = detectServices({
+    files: ["web/package.json", "web/src/app.tsx"],
+    readFile: (path) =>
+      path === "web/package.json"
+        ? JSON.stringify({ scripts: { dev: "vite", test: "vitest run" } })
+        : undefined,
+  });
+  assert.deepEqual(services[0]?.serve, ["npm run dev"]);
+  const merged = mergeServices(services, [
+    { name: services[0]?.name ?? "web", serve: ["pnpm dev"] },
+  ]);
+  assert.deepEqual(merged[0]?.serve, ["pnpm dev"]);
 });

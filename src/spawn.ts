@@ -79,7 +79,8 @@ export function toolsForRole(role: IsolatedRole): string[] {
     custom.push("devteam_mockup");
   }
   if (role === "scout") return ["read", "grep", "find", "ls", ...custom];
-  if (role === "orchestrator" || role === "planner_orchestrator") return [...READ_TOOL_NAMES, ...custom];
+  if (role === "orchestrator" || role === "planner_orchestrator")
+    return [...READ_TOOL_NAMES, ...custom];
   if (role === "database" || role === "backend" || role === "frontend" || role === "general") {
     return [...READ_TOOL_NAMES, "edit", "write", ...custom];
   }
@@ -114,7 +115,8 @@ export function isOmpHost(
 
   if (env.OH_MY_PI === "1" || env.OH_MY_PI === "true") return true;
   if ((env.PI_CODING_AGENT_PACKAGE ?? "").includes("oh-my-pi")) return true;
-  if (Object.keys(env).some((key) => key.startsWith("OMP_") || key.startsWith("OH_MY_PI"))) return true;
+  if (Object.keys(env).some((key) => key.startsWith("OMP_") || key.startsWith("OH_MY_PI")))
+    return true;
 
   const candidates = [execPath, argv[1] ?? "", argv[0] ?? "", env._ ?? ""]
     .map((value) => value.toLowerCase().replaceAll("\\", "/"))
@@ -262,17 +264,20 @@ function serviceBlock(role: IsolatedRole, service?: ServiceInfo, services?: Serv
       `Service: ${service.name} — ${langs}, rooted at ${root}. Write ${langs} the way the rest of that service is written; do not carry another service's idioms into it.`,
       service.test.length ? `Tests: run \`${service.test.join(" && ")}\` from ${root}` : "",
       service.lint.length ? `Lint: \`${service.lint.join(" && ")}\`` : "",
+      role === "demo" && service.serve.length
+        ? `Serve: run \`${service.serve.join(" && ")}\` from ${root}`
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
   }
   const all = services ?? [];
   if (all.length < 2) return "";
-  const wantsCommands = role === "tester" || role === "linter";
+  const wantsCommands = role === "tester" || role === "linter" || role === "demo";
   const lines = all.map((entry) => {
     const root = entry.root ? `${entry.root}/` : "./";
     const langs = entry.languages.length ? entry.languages.join("+") : "unknown";
-    const kind = role === "linter" ? entry.lint : entry.test;
+    const kind = role === "linter" ? entry.lint : role === "demo" ? entry.serve : entry.test;
     const commands = wantsCommands && kind.length ? ` — \`${kind.join(" && ")}\`` : "";
     return `- ${entry.name} (${langs}) at ${root}${commands}`;
   });
@@ -302,6 +307,8 @@ export function expectedHandoffActions(role: IsolatedRole): string[] {
     case "tester":
     case "linter":
       return ["qa_pass", "qa_fail"];
+    case "demo":
+      return ["qa_pass"];
     case "commit_message":
       return ["commit_drafted"];
     default:

@@ -2,7 +2,9 @@
   "name": "pi-dev-team",
   "version": "0.2.9",
   "description": "Pi extension: /devteam runs a planner, optional designer, and specialized implementors with official stack skills.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/W4775/pi-dev-team.git"
@@ -25,7 +27,10 @@
     "vendor-licenses"
   ],
   "scripts": {
-    "test": "node --test --experimental-strip-types test/*.test.ts"
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "lint": "oxlint src test",
+    "fmt": "oxfmt --write src test",
+    "fmt:check": "oxfmt --check src test"
   },
   "dependencies": {
     "typebox": "*"
@@ -36,19 +41,33 @@
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-ai": { "optional": true },
-    "@earendil-works/pi-coding-agent": { "optional": true }
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0"
   },
   "pi": {
-    "extensions": ["./src/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "omp": {
-    "extensions": ["./src/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "engines": {
     "node": ">=22"

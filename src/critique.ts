@@ -80,9 +80,7 @@ function itemFromUnknown(entry: unknown, index: number): CritiqueItem | undefine
     .map((value) => (typeof value === "string" ? value.trim() : ""))
     .find(Boolean);
   if (!text) return undefined;
-  const title =
-    (typeof node.title === "string" && node.title.trim()) ||
-    firstLine(text);
+  const title = (typeof node.title === "string" && node.title.trim()) || firstLine(text);
   const id = typeof node.id === "string" && node.id.trim() ? node.id.trim() : `c${index + 1}`;
   return { id, title, text };
 }

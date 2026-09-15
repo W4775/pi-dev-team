@@ -10,7 +10,10 @@ export function parseDevteamArgs(args: unknown): { trimmed: string; sub: string;
     if (typeof obj.text === "string") raw = obj.text;
     else if (typeof obj.args === "string") raw = obj.args;
   }
-  raw = raw.trim().replace(/^\/?devteam\b/i, "").trim();
+  raw = raw
+    .trim()
+    .replace(/^\/?devteam\b/i, "")
+    .trim();
   if (!raw) return { trimmed: "", sub: "", rest: "" };
   const [head, ...parts] = raw.split(/\s+/);
   return {

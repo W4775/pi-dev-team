@@ -36,29 +36,60 @@ type ManifestRule = {
 const MANIFESTS: ManifestRule[] = [
   { match: (b) => b === "go.mod", language: "go", test: ["go test ./..."], lint: ["go vet ./..."] },
   {
-    match: (b) => b === "pyproject.toml" || b === "requirements.txt" || b === "setup.py" || b === "Pipfile",
+    match: (b) =>
+      b === "pyproject.toml" || b === "requirements.txt" || b === "setup.py" || b === "Pipfile",
     language: "python",
     test: ["pytest"],
     lint: ["ruff check ."],
   },
-  { match: (b) => b === "Cargo.toml", language: "rust", test: ["cargo test"], lint: ["cargo clippy"] },
+  {
+    match: (b) => b === "Cargo.toml",
+    language: "rust",
+    test: ["cargo test"],
+    lint: ["cargo clippy"],
+  },
   {
     match: (b) => b.endsWith(".csproj") || b.endsWith(".fsproj") || b.endsWith(".vbproj"),
     language: "dotnet",
     test: ["dotnet test"],
     lint: ["dotnet format --verify-no-changes"],
   },
-  { match: (b) => b === "pom.xml", language: "java", test: ["mvn -q test"], lint: ["mvn -q verify"] },
+  {
+    match: (b) => b === "pom.xml",
+    language: "java",
+    test: ["mvn -q test"],
+    lint: ["mvn -q verify"],
+  },
   {
     match: (b) => b === "build.gradle" || b === "build.gradle.kts",
     language: "java",
     test: ["./gradlew test"],
     lint: ["./gradlew check"],
   },
-  { match: (b) => b === "Gemfile", language: "ruby", test: ["bundle exec rspec"], lint: ["bundle exec rubocop"] },
-  { match: (b) => b === "composer.json", language: "php", test: ["composer test"], lint: ["composer lint"] },
-  { match: (b) => b === "mix.exs", language: "elixir", test: ["mix test"], lint: ["mix format --check-formatted"] },
-  { match: (b) => b === "package.json", language: "node", test: ["npm test"], lint: ["npm run lint"] },
+  {
+    match: (b) => b === "Gemfile",
+    language: "ruby",
+    test: ["bundle exec rspec"],
+    lint: ["bundle exec rubocop"],
+  },
+  {
+    match: (b) => b === "composer.json",
+    language: "php",
+    test: ["composer test"],
+    lint: ["composer lint"],
+  },
+  {
+    match: (b) => b === "mix.exs",
+    language: "elixir",
+    test: ["mix test"],
+    lint: ["mix format --check-formatted"],
+  },
+  {
+    match: (b) => b === "package.json",
+    language: "node",
+    test: ["npm test"],
+    lint: ["npm run lint"],
+  },
 ];
 
 const FRONTEND_DEPS = [
@@ -109,7 +140,8 @@ function nodeIsFrontend(dir: string, readFile: (relPath: string) => string | und
       const deps = new Set<string>();
       for (const key of ["dependencies", "devDependencies", "peerDependencies"]) {
         const block = json[key];
-        if (block && typeof block === "object") for (const name of Object.keys(block)) deps.add(name);
+        if (block && typeof block === "object")
+          for (const name of Object.keys(block)) deps.add(name);
       }
       if (FRONTEND_DEPS.some((dep) => deps.has(dep))) return true;
       if (deps.size) return false;
@@ -120,24 +152,32 @@ function nodeIsFrontend(dir: string, readFile: (relPath: string) => string | und
   return FRONTEND_DIR_NAMES.test(baseOf(dir));
 }
 
-function dotnetIsFrontend(dir: string, files: string[], readFile: (relPath: string) => string | undefined): boolean {
+function dotnetIsFrontend(
+  dir: string,
+  files: string[],
+  readFile: (relPath: string) => string | undefined,
+): boolean {
   return files
     .filter((file) => dirOf(file) === dir && /\.(cs|fs|vb)proj$/.test(file))
-    .some((file) => /Blazor|Components\.WebAssembly|Microsoft\.NET\.Sdk\.Razor/i.test(readFile(file) ?? ""));
+    .some((file) =>
+      /Blazor|Components\.WebAssembly|Microsoft\.NET\.Sdk\.Razor/i.test(readFile(file) ?? ""),
+    );
 }
 
 function scriptsFromPackageJson(
   dir: string,
   readFile: (relPath: string) => string | undefined,
-): { test?: string[]; lint?: string[] } {
+): { test?: string[]; lint?: string[]; serve?: string[] } {
   const text = readFile(dir ? `${dir}/package.json` : "package.json");
   if (!text) return {};
   try {
     const json = JSON.parse(text) as { scripts?: Record<string, string> };
     const scripts = json.scripts ?? {};
-    const out: { test?: string[]; lint?: string[] } = {};
+    const out: { test?: string[]; lint?: string[]; serve?: string[] } = {};
     if (scripts.test) out.test = ["npm test"];
     if (scripts.lint) out.lint = ["npm run lint"];
+    if (scripts.dev) out.serve = ["npm run dev"];
+    else if (scripts.start) out.serve = ["npm start"];
     return out;
   } catch {
     return {};
@@ -205,6 +245,7 @@ export function detectServices(input: ServiceScanInput): ServiceInfo[] {
       skills: LANGUAGE_STACK_IDS[primary] ?? [],
       test: [...new Set(scripts.test ?? rules.flatMap((rule) => rule.test))],
       lint: [...new Set(scripts.lint ?? rules.flatMap((rule) => rule.lint))],
+      serve: [...new Set(scripts.serve ?? [])],
       source: "detected",
     });
   }
@@ -221,7 +262,10 @@ function asList(value: unknown): string[] {
   return [];
 }
 
-export function mergeServices(detected: ServiceInfo[], configured: ServiceConfig[] | undefined): ServiceInfo[] {
+export function mergeServices(
+  detected: ServiceInfo[],
+  configured: ServiceConfig[] | undefined,
+): ServiceInfo[] {
   if (!configured?.length) return detected;
   const out = detected.map((service) => ({ ...service }));
   const taken = new Set(out.map((service) => service.name.toLowerCase()));
@@ -244,6 +288,7 @@ export function mergeServices(detected: ServiceInfo[], configured: ServiceConfig
       if (asList(entry.skills).length) existing.skills = asList(entry.skills);
       if (asList(entry.test).length) existing.test = asList(entry.test);
       if (asList(entry.lint).length) existing.lint = asList(entry.lint);
+      if (asList(entry.serve).length) existing.serve = asList(entry.serve);
       existing.source = "merged";
       continue;
     }
@@ -259,6 +304,7 @@ export function mergeServices(detected: ServiceInfo[], configured: ServiceConfig
       skills: asList(entry.skills),
       test: asList(entry.test),
       lint: asList(entry.lint),
+      serve: asList(entry.serve),
       source: "config",
     });
   }
@@ -287,6 +333,7 @@ export function normalizeServices(raw: unknown): ServiceInfo[] {
       skills: asList(node.skills),
       test: asList(node.test),
       lint: asList(node.lint),
+      serve: asList(node.serve),
       source: node.source === "config" || node.source === "merged" ? node.source : "detected",
     });
   }
@@ -337,7 +384,10 @@ export function servicesForFiles(
   return hits.size ? [...hits] : serviceQueueForLayer(services, layer);
 }
 
-export function serviceForPath(services: ServiceInfo[] | undefined, filePath: string): ServiceInfo | undefined {
+export function serviceForPath(
+  services: ServiceInfo[] | undefined,
+  filePath: string,
+): ServiceInfo | undefined {
   const rel = filePath.replaceAll("\\", "/").replace(/^\.\//, "");
   let best: ServiceInfo | undefined;
   for (const service of services ?? []) {
@@ -352,7 +402,10 @@ export function serviceForPath(services: ServiceInfo[] | undefined, filePath: st
   return best;
 }
 
-export function serviceCommands(services: ServiceInfo[] | undefined, kind: "test" | "lint"): string[] {
+export function serviceCommands(
+  services: ServiceInfo[] | undefined,
+  kind: "test" | "lint" | "serve",
+): string[] {
   const out: string[] = [];
   for (const service of services ?? []) {
     for (const command of service[kind]) {
@@ -371,7 +424,8 @@ export function renderServices(services: ServiceInfo[] | undefined): string {
       const langs = service.languages.length ? service.languages.join("+") : "unknown";
       const test = service.test.length ? ` · test: ${service.test.join(" && ")}` : "";
       const lint = service.lint.length ? ` · lint: ${service.lint.join(" && ")}` : "";
-      return `- **${service.name}** (${service.layer}, ${langs}) — ${root}${test}${lint}`;
+      const serve = service.serve.length ? ` · serve: ${service.serve.join(" && ")}` : "";
+      return `- **${service.name}** (${service.layer}, ${langs}) — ${root}${test}${lint}${serve}`;
     })
     .join("\n");
 }

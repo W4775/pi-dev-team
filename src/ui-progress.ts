@@ -23,6 +23,8 @@ const STAGE_LABELS: Record<Stage, string> = {
   linter: "lint",
   fix_lint: "fix",
   commit_message: "commit",
+  demo_opt_in: "demo",
+  demo: "demo",
   done: "done",
   error: "error",
 };
@@ -40,7 +42,11 @@ export type ProgressEvent = {
 export type UiSurface = {
   hasUI?: boolean;
   ui?: {
-    setWidget?: (key: string, content: string[] | undefined, options?: { placement?: string }) => void;
+    setWidget?: (
+      key: string,
+      content: string[] | undefined,
+      options?: { placement?: string },
+    ) => void;
     setStatus?: (key: string, text: string | undefined) => void;
     setWorkingMessage?: (message?: string) => void;
     setWorkingVisible?: (visible: boolean) => void;
@@ -77,7 +83,9 @@ function loadTextCtor(): (new (text: string, padX?: number, padY?: number) => un
     const require = createRequire(url);
     for (const spec of ["@oh-my-pi/pi-tui", "@earendil-works/pi-tui"]) {
       try {
-        const mod = require(spec) as { Text?: new (text: string, padX?: number, padY?: number) => unknown };
+        const mod = require(spec) as {
+          Text?: new (text: string, padX?: number, padY?: number) => unknown;
+        };
         if (typeof mod.Text === "function") return mod.Text;
       } catch {
         /* optional peer */
@@ -98,7 +106,9 @@ export function roleLabel(role: string | RoleName | undefined): string {
 }
 
 function uniqueRoles(activities: ChildActivity[], fallback?: string): string {
-  const names = [...new Set(activities.map((activity) => roleLabel(activity.role)).filter(Boolean))];
+  const names = [
+    ...new Set(activities.map((activity) => roleLabel(activity.role)).filter(Boolean)),
+  ];
   if (names.length) return names.join(", ");
   return roleLabel(fallback);
 }
@@ -192,13 +202,17 @@ export function formatProgressBlock(block: ProgressBlock, now = Date.now()): str
   let header: string;
   if (block.status === "error") {
     const detail = block.error?.trim();
-    header = detail && !detail.toLowerCase().startsWith(title.toLowerCase())
-      ? `${title} failed: ${detail}`
-      : detail || `${title} failed`;
+    header =
+      detail && !detail.toLowerCase().startsWith(title.toLowerCase())
+        ? `${title} failed: ${detail}`
+        : detail || `${title} failed`;
   } else if (block.status === "finished") {
     header = `${title} finished in ${elapsed} · ${callPhrase}`;
   } else {
-    header = block.toolCalls > 0 ? `${title} · ${elapsed} · ${block.toolCalls} ${callWord}` : `${title} · ${elapsed}`;
+    header =
+      block.toolCalls > 0
+        ? `${title} · ${elapsed} · ${block.toolCalls} ${callWord}`
+        : `${title} · ${elapsed}`;
   }
   const hidden = Math.max(0, block.lines.length - MAX_PROGRESS_LINES);
   const visible = block.lines.slice(-MAX_PROGRESS_LINES);
@@ -209,7 +223,8 @@ export function formatProgressBlock(block: ProgressBlock, now = Date.now()): str
 function detailsRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object") return undefined;
   const node = value as Record<string, unknown>;
-  if (node.details && typeof node.details === "object") return node.details as Record<string, unknown>;
+  if (node.details && typeof node.details === "object")
+    return node.details as Record<string, unknown>;
   if (node.data && typeof node.data === "object") return node.data as Record<string, unknown>;
   return node;
 }
@@ -219,7 +234,8 @@ function blockFromValue(value: unknown): ProgressBlock | undefined {
   if (!details) return undefined;
   const id = details.id;
   if (typeof id === "string" && blocksById.has(id)) return blocksById.get(id);
-  if (typeof details.groupKey === "string" && Array.isArray(details.lines)) return details as unknown as ProgressBlock;
+  if (typeof details.groupKey === "string" && Array.isArray(details.lines))
+    return details as unknown as ProgressBlock;
   return undefined;
 }
 
@@ -308,7 +324,11 @@ function patchSessionEntries(sessionManager: unknown, blockId: string, text: str
   for (const entry of entries) {
     if (!entry || typeof entry !== "object") continue;
     const rec = entry as Record<string, unknown>;
-    if (rec.type === "custom_message" && rec.customType === "devteam" && detailsBlockId(rec.details) === blockId) {
+    if (
+      rec.type === "custom_message" &&
+      rec.customType === "devteam" &&
+      detailsBlockId(rec.details) === blockId
+    ) {
       rec.content = text;
     }
     const message = rec.message;
@@ -360,14 +380,20 @@ export function registerDevteamRenderers(pi: unknown): void {
     return node;
   };
   try {
-    host.registerEntryRenderer?.("devteam", ((entry: unknown, _opts: unknown, theme: { fg?: (key: string, text: string) => string }) =>
-      render(entry, theme)) as (...args: never[]) => unknown);
+    host.registerEntryRenderer?.("devteam", ((
+      entry: unknown,
+      _opts: unknown,
+      theme: { fg?: (key: string, text: string) => string },
+    ) => render(entry, theme)) as (...args: never[]) => unknown);
   } catch {
     /* host without entry renderers */
   }
   try {
-    host.registerMessageRenderer?.("devteam", ((message: unknown, _opts: unknown, theme: { fg?: (key: string, text: string) => string }) =>
-      render(message, theme)) as (...args: never[]) => unknown);
+    host.registerMessageRenderer?.("devteam", ((
+      message: unknown,
+      _opts: unknown,
+      theme: { fg?: (key: string, text: string) => string },
+    ) => render(message, theme)) as (...args: never[]) => unknown);
   } catch {
     /* host without message renderers */
   }

@@ -37,7 +37,10 @@ const PATH_KEYS = ["path", "file", "file_path", "filePath", "target", "filename"
 const COMMAND_KEYS = ["command", "cmd", "script"];
 const QUERY_KEYS = ["pattern", "query", "regex", "search"];
 
-function firstString(source: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+function firstString(
+  source: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
   if (!source) return undefined;
   for (const key of keys) {
     const value = source[key];
@@ -46,12 +49,16 @@ function firstString(source: Record<string, unknown> | undefined, keys: string[]
   return undefined;
 }
 
-function firstNumber(source: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+function firstNumber(
+  source: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
   if (!source) return undefined;
   for (const key of keys) {
     const value = source[key];
     if (typeof value === "number" && Number.isFinite(value)) return String(value);
-    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return value.trim();
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value)))
+      return value.trim();
   }
   return undefined;
 }
@@ -101,12 +108,17 @@ function shorten(text: string, max: number): string {
 
 function tail(path: string, segments = 3): string {
   const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
-  return parts.length <= segments ? path.replaceAll("\\", "/") : `…/${parts.slice(-segments).join("/")}`;
+  return parts.length <= segments
+    ? path.replaceAll("\\", "/")
+    : `…/${parts.slice(-segments).join("/")}`;
 }
 
 export function describeToolCall(name: string, input: unknown): string {
   const tool = name.trim();
-  const args = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined;
+  const args =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : undefined;
   const path = firstString(args, PATH_KEYS);
   const command = firstString(args, COMMAND_KEYS);
   const query = firstString(args, QUERY_KEYS);
@@ -320,6 +332,7 @@ const BUILD_TOOL_ROLES = new Set([
   "reviewer",
   "tester",
   "linter",
+  "demo",
 ]);
 
 export function defaultMaxToolCalls(role?: string): number {
@@ -389,7 +402,11 @@ export type ChildActivity = {
   abort?: () => void;
 };
 
-export function elapsedSuffix(activities: ChildActivity[], locked = false, now = Date.now()): string {
+export function elapsedSuffix(
+  activities: ChildActivity[],
+  locked = false,
+  now = Date.now(),
+): string {
   if (!activities.length) return locked ? " (running)" : "";
   const startedAt = Math.min(...activities.map((activity) => activity.startedAt));
   return ` (${formatElapsed(now - startedAt)})`;

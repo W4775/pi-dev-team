@@ -40,7 +40,8 @@ Isolated children **do not** pass `--no-extensions`, so your other extensions ke
 6. **Orchestrator** (isolated) — splits the spec into work items with file allowlists
 7. **Implementors** — only the layers this change needs (database → backend → frontend → general, skipping any that have no notes, files, or work items). Items with disjoint files in the same layer run together (default 3, cap 6). After each layer, a **reviewer** judges that layer; `qa_fail` sends that layer's implementor back to fix, then review runs again until it passes (max 3 fix rounds). Only then does the next layer start. If the orchestrator produces no items, the sequential path still runs **those needed layers only**, with the same per-layer review loop.
 8. **Tester → linter** after the last layer's review passes, each with its own fix-it loop (max 3 rounds). Blocks vs notes. Fowler smells are notes. Hitting a cap continues to the next QA stage.
-9. **Commit-message** — drafts a conventional message. **Does not commit.**
+9. **Demo** — only for web frontends you opted into (`wantDemo` during grilling, or yes when asked after QA). A demo child serves the app locally and drives it live in a headed Playwright browser while you watch. Findings are notes, never blocks.
+10. **Commit-message** — drafts a conventional message. **Does not commit.**
 
 Planner and designer stay in the current Pi session. Everything else is an isolated `pi` child using the same model. When a role calls `devteam_handoff`, the next role starts immediately.
 
@@ -179,7 +180,7 @@ Cap is **3** stack skills per child.
   },
   "services": [
     { "name": "api", "root": "services/api", "layer": "backend", "test": ["go test ./..."] },
-    { "name": "scoring", "root": "services/scoring", "layer": "backend", "test": ["pytest"] }
+    { "name": "web", "root": "web", "layer": "frontend", "test": ["npm test"], "serve": ["npm run dev"] }
   ],
   "maxToolCalls": 200,
   "parallel": 3,
@@ -256,6 +257,7 @@ Unit tests cover permissions, run state, skip behavior, layer routing, block vs 
 - Planner, critics, reviewer, and commit-message cannot edit the repo
 - Designer writes mockups only via `devteam_mockup`
 - Implementors may edit the tree but cannot write `.env` / key files and cannot `git commit`
+- Demo may run the agreed serve command and headed Playwright, and write under the run's demo directory only
 - Optional per-layer path globs in `devteam.json`
 
 ## License

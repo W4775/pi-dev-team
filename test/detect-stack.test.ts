@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { loadCatalog } from "../src/catalog.ts";
-import { collectNpmDeps, detectStack, entryMatches, stackIdsForLayer } from "../src/detect-stack.ts";
+import {
+  collectNpmDeps,
+  detectStack,
+  entryMatches,
+  stackIdsForLayer,
+} from "../src/detect-stack.ts";
 
 const catalog = loadCatalog();
 

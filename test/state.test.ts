@@ -20,7 +20,12 @@ import {
   workflowStatePaths,
   writeCurrentJobId,
 } from "../src/state.ts";
-import { applyHandoffTool, applyMockupTool, applyStateTool, resolveMockupRel } from "../src/tools.ts";
+import {
+  applyHandoffTool,
+  applyMockupTool,
+  applyStateTool,
+  resolveMockupRel,
+} from "../src/tools.ts";
 
 test("clear-on-new-task removes json and mockup dir", () => {
   const agentDir = mkdtempSync(join(tmpdir(), "devteam-agent-"));
@@ -73,7 +78,10 @@ test("two pi sessions keep separate current jobs", () => {
   assert.equal(readCurrentJobId(agentDir, "sess-b"), "job-b");
   // No alias merge: sess-b sees nothing, mutate creates nothing from sess-a.
   assert.equal(loadRun(runPaths(agentDir, "job-b").json), undefined);
-  assert.equal(mutateRun(runPaths(agentDir, "job-b").json, agentDir, (c) => c), undefined);
+  assert.equal(
+    mutateRun(runPaths(agentDir, "job-b").json, agentDir, (c) => c),
+    undefined,
+  );
   assert.equal(loadRun(runPaths(agentDir, "job-b").json), undefined);
 });
 test("block vs note tags win over keyword heuristics", () => {

@@ -6,7 +6,16 @@ import { normalizeServices, renderServices } from "./services.ts";
 import { normalizeWorkItems, renderWorkItems } from "./work.ts";
 import { normalizeScoutItems, renderScoutItems } from "./scout.ts";
 import { withCritiqueItems } from "./critique.ts";
-import type { Finding, ImplementorLayer, PauseReason, RoleName, RunState, StackDetection, Stage, UiSurface } from "./types.ts";
+import type {
+  Finding,
+  ImplementorLayer,
+  PauseReason,
+  RoleName,
+  RunState,
+  StackDetection,
+  Stage,
+  UiSurface,
+} from "./types.ts";
 
 export const STATE_SECTIONS = [
   "task",
@@ -15,6 +24,7 @@ export const STATE_SECTIONS = [
   "filesToChange",
   "uiSurface",
   "wantMockup",
+  "wantDemo",
   "stack",
   "workItems",
   "scoutItems",
@@ -25,6 +35,9 @@ export const STATE_SECTIONS = [
   "designPlan",
   "mockupPath",
   "mockupVersion",
+  "demoPath",
+  "demoVersion",
+  "demoNotes",
   "designCritiqueNotes",
   "databaseNotes",
   "backendNotes",
@@ -72,6 +85,7 @@ export function runPaths(agentDir: string, sessionId: string) {
     workflowStateMd: aliases.md,
     mockupDir: join(dir, safe, "mockup"),
     mockupFile: join(dir, safe, "mockup", "index.html"),
+    demoDir: join(dir, safe, "demo"),
   };
 }
 
@@ -121,7 +135,9 @@ export function normalizeStack(raw: unknown, fallbackUi?: UiSurface): StackDetec
   const o = raw as Record<string, unknown>;
   const ui = o.uiSurface;
   const uiSurface: UiSurface =
-    ui === "web" || ui === "native" || ui === "terminal" || ui === "none" ? ui : (fallbackUi ?? "none");
+    ui === "web" || ui === "native" || ui === "terminal" || ui === "none"
+      ? ui
+      : (fallbackUi ?? "none");
   const backend = asOptionalString(o.backend);
   const backends = asStringList(o.backends);
   return {
@@ -153,7 +169,6 @@ export function loadRun(path: string): RunState | undefined {
     return undefined;
   }
 }
-
 
 export function saveRun(path: string, run: RunState, agentDir?: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -217,6 +232,8 @@ export function getSection(run: RunState, section: StateSection): unknown {
       return run.uiSurface;
     case "wantMockup":
       return run.wantMockup;
+    case "wantDemo":
+      return run.wantDemo;
     case "stack":
       return run.stack;
     case "workItems":
@@ -239,6 +256,12 @@ export function getSection(run: RunState, section: StateSection): unknown {
       return run.mockupVersion;
     case "designCritiqueNotes":
       return run.designCritiqueNotes;
+    case "demoPath":
+      return run.demoPath;
+    case "demoVersion":
+      return run.demoVersion;
+    case "demoNotes":
+      return run.demoNotes;
     case "databaseNotes":
       return run.databaseNotes;
     case "backendNotes":
@@ -276,19 +299,29 @@ export function updateSection(run: RunState, section: StateSection, value: unkno
       next.spec = String(value ?? "");
       break;
     case "layersNeeded":
-      next.layersNeeded = Array.isArray(value) ? value.map(String) : String(value ?? "").split(/[,\s]+/).filter(Boolean);
+      next.layersNeeded = Array.isArray(value)
+        ? value.map(String)
+        : String(value ?? "")
+            .split(/[,\s]+/)
+            .filter(Boolean);
       break;
     case "filesToChange":
       next.filesToChange = (value ?? {}) as RunState["filesToChange"];
       break;
     case "uiSurface":
       next.uiSurface = value as RunState["uiSurface"];
-      if (next.stack) next.stack = { ...next.stack, uiSurface: next.uiSurface ?? next.stack.uiSurface };
+      if (next.stack)
+        next.stack = { ...next.stack, uiSurface: next.uiSurface ?? next.stack.uiSurface };
       break;
     case "wantMockup":
       if (value === true || value === "true" || value === "yes") next.wantMockup = true;
       else if (value === false || value === "false" || value === "no") next.wantMockup = false;
       else next.wantMockup = undefined;
+      break;
+    case "wantDemo":
+      if (value === true || value === "true" || value === "yes") next.wantDemo = true;
+      else if (value === false || value === "false" || value === "no") next.wantDemo = false;
+      else next.wantDemo = undefined;
       break;
     case "stack":
       next.stack = normalizeStack(value, next.uiSurface ?? next.stack?.uiSurface);
@@ -324,6 +357,15 @@ export function updateSection(run: RunState, section: StateSection, value: unkno
       break;
     case "designCritiqueNotes":
       next.designCritiqueNotes = String(value ?? "");
+      break;
+    case "demoPath":
+      next.demoPath = String(value ?? "");
+      break;
+    case "demoVersion":
+      next.demoVersion = Number(value) || 0;
+      break;
+    case "demoNotes":
+      next.demoNotes = String(value ?? "");
       break;
     case "databaseNotes":
       next.databaseNotes = String(value ?? "");
@@ -439,10 +481,15 @@ export function renderRunMarkdown(
     `- **Stage:** ${run.stage}${run.pauseReason ? ` (paused: ${run.pauseReason})` : ""}`,
     `- **Locked:** ${run.pipelineLocked ? "yes" : "no"}`,
     `- **Want mockup:** ${run.wantMockup === undefined ? "unset" : run.wantMockup ? "yes" : "no"}`,
+    `- **Want demo:** ${run.wantDemo === undefined ? "unset" : run.wantDemo ? "yes" : "no"}`,
   ];
   if (run.stack) {
-    const database = Array.isArray(run.stack.database) ? run.stack.database.join(",") : String(run.stack.database ?? "");
-    const matched = Array.isArray(run.stack.matchedIds) ? run.stack.matchedIds.join(", ") : String(run.stack.matchedIds ?? "");
+    const database = Array.isArray(run.stack.database)
+      ? run.stack.database.join(",")
+      : String(run.stack.database ?? "");
+    const matched = Array.isArray(run.stack.matchedIds)
+      ? run.stack.matchedIds.join(", ")
+      : String(run.stack.matchedIds ?? "");
     const backends = run.stack.backends?.length ? run.stack.backends.join(",") : run.stack.backend;
     lines.push(
       `- **Stack:** frontend=${run.stack.frontend ?? "—"} backend=${backends || "—"} database=${database || "—"} ui=${run.stack.uiSurface ?? "—"}`,
@@ -452,17 +499,24 @@ export function renderRunMarkdown(
   if (run.resolvedSkills) {
     for (const [layer, skills] of Object.entries(run.resolvedSkills)) {
       const desc = skills
-        .map((s) => (s.source === "unresolved" ? `${s.name} (unresolved)` : `${s.name} [${s.source}]`))
+        .map((s) =>
+          s.source === "unresolved" ? `${s.name} (unresolved)` : `${s.name} [${s.source}]`,
+        )
         .join(", ");
       lines.push(`- **Skills (${layer}):** ${desc || "workflow skills only"}`);
     }
   }
-  if (run.gitBaseline) lines.push(`- **Git baseline:** ${run.gitBaseline}${run.dirtyAtStart ? " (dirty tree at start)" : ""}`);
+  if (run.gitBaseline)
+    lines.push(
+      `- **Git baseline:** ${run.gitBaseline}${run.dirtyAtStart ? " (dirty tree at start)" : ""}`,
+    );
   if (run.layersNeeded?.length) lines.push(`- **Layers needed:** ${run.layersNeeded.join(", ")}`);
   if (run.reviewLayer) lines.push(`- **Review layer:** ${run.reviewLayer}`);
   if (run.currentService) lines.push(`- **Current service:** ${run.currentService}`);
-  if (run.stack?.services?.length) lines.push(``, `## Services`, ``, renderServices(run.stack.services));
-  if (run.scoutItems?.length) lines.push(``, `## Scout items`, ``, renderScoutItems(run.scoutItems));
+  if (run.stack?.services?.length)
+    lines.push(``, `## Services`, ``, renderServices(run.stack.services));
+  if (run.scoutItems?.length)
+    lines.push(``, `## Scout items`, ``, renderScoutItems(run.scoutItems));
   if (run.scoutNotes) lines.push(``, `## Scout notes`, ``, run.scoutNotes);
   if (run.workItems?.length) lines.push(``, `## Work items`, ``, renderWorkItems(run.workItems));
   if (run.spec) lines.push(``, `## Spec`, ``, run.spec);
@@ -470,7 +524,8 @@ export function renderRunMarkdown(
     lines.push(``, `## Plan critique`, ``, run.planCritique.notes || "");
     if (run.planCritique.items?.length) {
       for (const item of run.planCritique.items) {
-        const mark = item.decision === "accept" ? "accept" : item.decision === "reject" ? "reject" : "pending";
+        const mark =
+          item.decision === "accept" ? "accept" : item.decision === "reject" ? "reject" : "pending";
         lines.push(`- [${mark}] ${item.title}: ${item.text}`);
       }
     }
@@ -478,7 +533,8 @@ export function renderRunMarkdown(
   if (run.designTokens) lines.push(``, `## Design tokens`, ``, run.designTokens);
   if (run.uiPrimitives) lines.push(``, `## UI primitives`, ``, run.uiPrimitives);
   if (run.designPlan) lines.push(``, `## Design plan`, ``, run.designPlan);
-  if (run.mockupPath) lines.push(``, `- **Mockup:** ${run.mockupPath} (v${run.mockupVersion ?? 1})`);
+  if (run.mockupPath)
+    lines.push(``, `- **Mockup:** ${run.mockupPath} (v${run.mockupVersion ?? 1})`);
   if (run.designCritiqueNotes) lines.push(``, `## Design critique`, ``, run.designCritiqueNotes);
   if (run.databaseNotes) lines.push(``, `## Database`, ``, run.databaseNotes);
   if (run.backendNotes) lines.push(``, `## Backend`, ``, run.backendNotes);
@@ -493,10 +549,16 @@ export function renderRunMarkdown(
   }
   if (run.testResults) lines.push(``, `## Tests`, ``, run.testResults);
   if (run.lintResults) lines.push(``, `## Lint`, ``, run.lintResults);
-  if (run.commitMessageDraft) lines.push(``, `## Commit message draft`, ``, "```", run.commitMessageDraft, "```");
+  if (run.demoPath) lines.push(``, `- **Demo:** ${run.demoPath} (v${run.demoVersion ?? 1})`);
+  if (run.demoNotes) lines.push(``, `## Demo`, ``, run.demoNotes);
+  if (run.commitMessageDraft)
+    lines.push(``, `## Commit message draft`, ``, "```", run.commitMessageDraft, "```");
   if (run.currentStatus) lines.push(``, `## Status`, ``, run.currentStatus);
   if (run.lastError) lines.push(``, `## Last error`, ``, run.lastError);
-  lines.push(``, `_Fix rounds:_ review ${run.fixRound.review}, test ${run.fixRound.test}, lint ${run.fixRound.lint}`);
+  lines.push(
+    ``,
+    `_Fix rounds:_ review ${run.fixRound.review}, test ${run.fixRound.test}, lint ${run.fixRound.lint}`,
+  );
   if (files?.canonicalPath || files?.aliasPath) {
     lines.push(``, `## Files`, ``);
     if (files.aliasPath) {
@@ -510,13 +572,18 @@ export function renderRunMarkdown(
   return lines.join("\n");
 }
 
-export function setStage(run: RunState, stage: Stage, extra?: { pauseReason?: PauseReason; role?: RoleName }): RunState {
+export function setStage(
+  run: RunState,
+  stage: Stage,
+  extra?: { pauseReason?: PauseReason; role?: RoleName },
+): RunState {
   return {
     ...run,
     stage,
     pauseReason: extra?.pauseReason,
     currentRole: extra?.role,
-    interactiveRole: extra?.role === "planner" || extra?.role === "designer" ? extra.role : undefined,
+    interactiveRole:
+      extra?.role === "planner" || extra?.role === "designer" ? extra.role : undefined,
     pipelineLocked: false,
     updatedAt: new Date().toISOString(),
   };
@@ -530,7 +597,8 @@ export function layerFromFile(
   if (filesToChange) {
     for (const layer of ["database", "backend", "frontend", "general"] as ImplementorLayer[]) {
       const listed = filesToChange[layer] ?? [];
-      if (listed.some((p) => file.endsWith(p) || p.endsWith(file) || file.includes(p))) return layer;
+      if (listed.some((p) => file.endsWith(p) || p.endsWith(file) || file.includes(p)))
+        return layer;
     }
   }
   if (globs) {

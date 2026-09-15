@@ -2,7 +2,14 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HandoffAction } from "./types.ts";
 import { HANDOFF_ACTIONS } from "./types.ts";
-import { getSection, renderRunMarkdown, runPaths, STATE_SECTIONS, type StateSection, updateSection } from "./state.ts";
+import {
+  getSection,
+  renderRunMarkdown,
+  runPaths,
+  STATE_SECTIONS,
+  type StateSection,
+  updateSection,
+} from "./state.ts";
 import { setItemStatus } from "./work.ts";
 import { setScoutStatus } from "./scout.ts";
 import type { RunState } from "./types.ts";
@@ -35,7 +42,8 @@ export function applyStateTool(
   params: { action: string; section?: string; value?: string },
 ): { text: string; isError?: boolean } {
   const run = store.load();
-  if (!run) return { text: "No active /devteam run. Start one with /devteam <task>.", isError: true };
+  if (!run)
+    return { text: "No active /devteam run. Start one with /devteam <task>.", isError: true };
 
   if (params.action === "get") {
     if (params.section) {
@@ -44,10 +52,12 @@ export function applyStateTool(
       }
       return { text: JSON.stringify(getSection(run, params.section) ?? null, null, 2) };
     }
-    return { text: renderRunMarkdown(run, {
-      canonicalPath: runPaths(store.agentDir(), store.sessionId()).json,
-      aliasPath: runPaths(store.agentDir(), store.sessionId()).workflowStateJson,
-    }) };
+    return {
+      text: renderRunMarkdown(run, {
+        canonicalPath: runPaths(store.agentDir(), store.sessionId()).json,
+        aliasPath: runPaths(store.agentDir(), store.sessionId()).workflowStateJson,
+      }),
+    };
   }
 
   if (!params.section || !isStateSection(params.section)) {
@@ -61,10 +71,16 @@ export function applyStateTool(
       const prevText = typeof prev === "string" ? prev : prev == null ? "" : JSON.stringify(prev);
       return prevText ? `${prevText}\n${params.value ?? ""}` : (params.value ?? "");
     }
-    if (section === "layersNeeded" || section === "wantMockup") {
+    if (section === "layersNeeded" || section === "wantMockup" || section === "wantDemo") {
       return params.value ?? "";
     }
-    if (section === "filesToChange" || section === "stack" || section === "reviewFindings" || section === "workItems" || section === "scoutItems") {
+    if (
+      section === "filesToChange" ||
+      section === "stack" ||
+      section === "reviewFindings" ||
+      section === "workItems" ||
+      section === "scoutItems"
+    ) {
       try {
         return params.value ? JSON.parse(params.value) : params.value;
       } catch {

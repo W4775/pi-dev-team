@@ -3,8 +3,12 @@ import { MAX_SCOUTS, MAX_WORK_ITEM_ATTEMPTS, WORK_ITEM_STATUSES } from "./types.
 import { resolveParallel } from "./work.ts";
 
 function asStatus(value: unknown): WorkItemStatus {
-  const text = String(value ?? "").trim().toLowerCase();
-  return (WORK_ITEM_STATUSES as readonly string[]).includes(text) ? (text as WorkItemStatus) : "pending";
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return (WORK_ITEM_STATUSES as readonly string[]).includes(text)
+    ? (text as WorkItemStatus)
+    : "pending";
 }
 
 function asList(value: unknown): string[] {
@@ -37,7 +41,8 @@ export function normalizeScoutItems(raw: unknown): ScoutItem[] {
     }
   }
   if (source && typeof source === "object" && !Array.isArray(source)) {
-    const wrapped = (source as Record<string, unknown>).items ?? (source as Record<string, unknown>).scoutItems;
+    const wrapped =
+      (source as Record<string, unknown>).items ?? (source as Record<string, unknown>).scoutItems;
     if (Array.isArray(wrapped)) source = wrapped;
   }
   if (!Array.isArray(source)) return [];
@@ -53,11 +58,13 @@ export function normalizeScoutItems(raw: unknown): ScoutItem[] {
     while (used.has(id)) id = `${id}-${index + 1}`;
     used.add(id);
     const service = String(node.service ?? node.serviceName ?? "").trim();
-    const findings = typeof node.findings === "string" && node.findings.trim() ? node.findings.trim() : undefined;
+    const findings =
+      typeof node.findings === "string" && node.findings.trim() ? node.findings.trim() : undefined;
     items.push({
       id,
       title,
-      details: typeof node.details === "string" && node.details.trim() ? node.details.trim() : undefined,
+      details:
+        typeof node.details === "string" && node.details.trim() ? node.details.trim() : undefined,
       files: asList(node.files ?? node.paths),
       service: service || undefined,
       status: asStatus(node.status),
@@ -85,7 +92,10 @@ export function setScoutStatus(
   return (items ?? []).map((item) => (item.id === id ? { ...item, ...patch } : item));
 }
 
-export function findScout(items: ScoutItem[] | undefined, id: string | undefined): ScoutItem | undefined {
+export function findScout(
+  items: ScoutItem[] | undefined,
+  id: string | undefined,
+): ScoutItem | undefined {
   if (!id) return undefined;
   return (items ?? []).find((item) => item.id === id);
 }
@@ -104,13 +114,20 @@ export function compileScoutNotes(items: ScoutItem[] | undefined, existing?: str
 }
 
 export function retryableScouts(items: ScoutItem[] | undefined): ScoutItem[] {
-  return (items ?? []).filter((item) => item.status === "failed" && item.attempts < MAX_WORK_ITEM_ATTEMPTS);
+  return (items ?? []).filter(
+    (item) => item.status === "failed" && item.attempts < MAX_WORK_ITEM_ATTEMPTS,
+  );
 }
 
 export function renderScoutItems(items: ScoutItem[] | undefined): string {
   const all = items ?? [];
   if (!all.length) return "";
-  const mark: Record<WorkItemStatus, string> = { pending: " ", running: "~", done: "x", failed: "!" };
+  const mark: Record<WorkItemStatus, string> = {
+    pending: " ",
+    running: "~",
+    done: "x",
+    failed: "!",
+  };
   return all
     .map((item) => {
       const files = item.files.length ? ` — ${item.files.slice(0, 4).join(", ")}` : "";

@@ -20,9 +20,13 @@ type SelectUi = {
     select?: (
       title: string,
       options: Array<string | { label: string; description?: string }>,
+      opts?: { signal?: AbortSignal },
+    ) => Promise<string | undefined>;
+    input?: (
+      title: string,
+      placeholder?: string,
       options?: { signal?: AbortSignal },
     ) => Promise<string | undefined>;
-    input?: (title: string, placeholder?: string, options?: { signal?: AbortSignal }) => Promise<string | undefined>;
     askDialog?: (
       questions: Array<{
         id: string;
@@ -32,7 +36,10 @@ type SelectUi = {
       }>,
       options?: { signal?: AbortSignal },
     ) => Promise<
-      | { kind: "submit"; results: Array<{ id: string; selectedOptions: string[]; customInput?: string }> }
+      | {
+          kind: "submit";
+          results: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
+        }
       | { kind: "chat" }
       | undefined
     >;
@@ -51,7 +58,10 @@ export function formatAskAnswers(answers: AskAnswer[]): string {
     if (!answer) return "";
     return formatOneAnswer(answer);
   }
-  return ["User answers:", ...answers.map((answer) => `${answer.id}: ${formatOneAnswer(answer)}`)].join("\n");
+  return [
+    "User answers:",
+    ...answers.map((answer) => `${answer.id}: ${formatOneAnswer(answer)}`),
+  ].join("\n");
 }
 
 function formatOneAnswer(answer: AskAnswer): string {
@@ -97,12 +107,21 @@ export async function promptQuestions(
 
   const answers: AskAnswer[] = [];
   for (const question of questions) {
-    const picked = await ctx.ui.select(question.question, withOtherOption(question.options), { signal: opts?.signal });
+    const picked = await ctx.ui.select(question.question, withOtherOption(question.options), {
+      signal: opts?.signal,
+    });
     if (picked == null) return undefined;
     if (picked === OTHER_OPTION) {
-      const custom = await ctx.ui.input?.(question.question, "Your answer", { signal: opts?.signal });
+      const custom = await ctx.ui.input?.(question.question, "Your answer", {
+        signal: opts?.signal,
+      });
       if (custom == null) return undefined;
-      answers.push({ id: question.id, question: question.question, selected: [OTHER_OPTION], custom: custom.trim() });
+      answers.push({
+        id: question.id,
+        question: question.question,
+        selected: [OTHER_OPTION],
+        custom: custom.trim(),
+      });
       continue;
     }
     answers.push({ id: question.id, question: question.question, selected: [picked] });

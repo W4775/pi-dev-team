@@ -15,13 +15,18 @@ import {
 
 test("tool calls keep the path, streamed tokens like hub do not", () => {
   assert.equal(describeToolCall("read", { path: "src/app/hub.tsx" }), "read src/app/hub.tsx");
-  assert.equal(describeToolCall("read", { path: "src/app/hub.tsx", offset: 80, limit: 80 }), "read src/app/hub.tsx:80+80");
+  assert.equal(
+    describeToolCall("read", { path: "src/app/hub.tsx", offset: 80, limit: 80 }),
+    "read src/app/hub.tsx:80+80",
+  );
   assert.equal(isUsefulLabel("hub", "text"), false);
   assert.equal(isUsefulLabel("the", "text"), false);
   assert.equal(isUsefulLabel("read src/app/hub.tsx", "tool"), true);
   assert.equal(progressFromLine(JSON.stringify({ type: "text", text: "hub" })), undefined);
   assert.equal(
-    progressFromLine(JSON.stringify({ type: "tool", name: "read", input: { path: "src/app/hub.tsx" } }))?.label,
+    progressFromLine(
+      JSON.stringify({ type: "tool", name: "read", input: { path: "src/app/hub.tsx" } }),
+    )?.label,
     "read src/app/hub.tsx",
   );
 });
@@ -29,7 +34,14 @@ test("tool calls keep the path, streamed tokens like hub do not", () => {
 test("activity line names the last useful action and the call count", () => {
   const now = 1_000_000;
   const line = activityLine(
-    { role: "frontend", startedAt: now - 72_000, label: "read src/app/hub.tsx", toolCalls: 12, lastEventAt: now, recentTools: [] },
+    {
+      role: "frontend",
+      startedAt: now - 72_000,
+      label: "read src/app/hub.tsx",
+      toolCalls: 12,
+      lastEventAt: now,
+      recentTools: [],
+    },
     now,
   );
   assert.match(line, /frontend/);
@@ -74,7 +86,10 @@ test("repeat-tool abort ignores edits, bare names, and paginated reads", () => {
   assert.equal(isRepeatedToolLoop(["read a", "read b", "read a"], 3), false);
   assert.equal(isRepeatedToolLoop(["read a", "read a"], 3), false);
   assert.equal(
-    isRepeatedToolLoop(["read src/app/hub.tsx:0+80", "read src/app/hub.tsx:80+80", "read src/app/hub.tsx:160+80"], 3),
+    isRepeatedToolLoop(
+      ["read src/app/hub.tsx:0+80", "read src/app/hub.tsx:80+80", "read src/app/hub.tsx:160+80"],
+      3,
+    ),
     false,
   );
 });
@@ -111,7 +126,9 @@ test("thinking and text token deltas are not tool calls", () => {
 
 test("Oh My Pi tool_stream_update chunks are not new tool calls", () => {
   assert.equal(
-    progressFromLine(JSON.stringify({ type: "tool_stream_update", toolCallId: "call_1", toolName: "read" })),
+    progressFromLine(
+      JSON.stringify({ type: "tool_stream_update", toolCallId: "call_1", toolName: "read" }),
+    ),
     undefined,
   );
   const parser = createProgressParser();
@@ -179,7 +196,12 @@ test("a streamed read plus thinking tokens is one tool call, not a repeat loop",
     },
     {
       type: "message_update",
-      assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call_1", toolName: "read" },
+      assistantMessageEvent: {
+        type: "toolcall_start",
+        contentIndex: 1,
+        id: "call_1",
+        toolName: "read",
+      },
     },
     {
       type: "tool_execution_start",
@@ -210,11 +232,23 @@ test("a streamed read plus thinking tokens is one tool call, not a repeat loop",
 test("duplicate events for the same toolCallId count as one call", () => {
   const parser = createProgressParser();
   const lines = [
-    { type: "tool_execution_start", toolCallId: "call_1", toolName: "edit", args: { path: "src/app/hub.tsx" } },
+    {
+      type: "tool_execution_start",
+      toolCallId: "call_1",
+      toolName: "edit",
+      args: { path: "src/app/hub.tsx" },
+    },
     { type: "tool", name: "edit", id: "call_1", input: { path: "src/app/hub.tsx" } },
-    { type: "tool_execution_start", toolCallId: "call_1", toolName: "edit", args: { path: "src/app/hub.tsx" } },
+    {
+      type: "tool_execution_start",
+      toolCallId: "call_1",
+      toolName: "edit",
+      args: { path: "src/app/hub.tsx" },
+    },
   ];
-  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  const tools = parser
+    .push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`)
+    .filter((update) => update.kind === "tool");
   assert.equal(tools.length, 1);
 });
 
@@ -226,9 +260,17 @@ test("eight frontend edits of the same file are not a stuck loop", () => {
     toolName: "edit",
     args: { path: "src/app/hub.tsx" },
   }));
-  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  const tools = parser
+    .push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`)
+    .filter((update) => update.kind === "tool");
   assert.equal(tools.length, 8);
-  assert.equal(isRepeatedToolLoop(tools.map((update) => update.label), 8), false);
+  assert.equal(
+    isRepeatedToolLoop(
+      tools.map((update) => update.label),
+      8,
+    ),
+    false,
+  );
 });
 
 test("eight start events with no path do not abort as identical reads", () => {
@@ -238,10 +280,21 @@ test("eight start events with no path do not abort as identical reads", () => {
     toolCallId: `read_${i}`,
     toolName: "read",
   }));
-  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  const tools = parser
+    .push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`)
+    .filter((update) => update.kind === "tool");
   assert.equal(tools.length, 8);
-  assert.equal(tools.every((update) => update.label === "read"), true);
-  assert.equal(isRepeatedToolLoop(tools.map((update) => update.label), 8), false);
+  assert.equal(
+    tools.every((update) => update.label === "read"),
+    true,
+  );
+  assert.equal(
+    isRepeatedToolLoop(
+      tools.map((update) => update.label),
+      8,
+    ),
+    false,
+  );
 });
 
 test("a shared envelope id does not drop later tool calls", () => {
@@ -253,7 +306,9 @@ test("a shared envelope id does not drop later tool calls", () => {
     toolName: "read",
     args: { path: `src/app/file-${i}.tsx` },
   }));
-  const tools = parser.push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`).filter((update) => update.kind === "tool");
+  const tools = parser
+    .push(`${lines.map((event) => JSON.stringify(event)).join("\n")}\n`)
+    .filter((update) => update.kind === "tool");
   assert.equal(tools.length, 5);
 });
 

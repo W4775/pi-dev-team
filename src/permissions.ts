@@ -1,7 +1,18 @@
 import { matchAnyGlob } from "./glob.ts";
 import { serviceCommands } from "./services.ts";
-import type { ImplementorLayer, IsolatedRole, ProjectConfig, RoleName, ServiceInfo } from "./types.ts";
-import { DEFAULT_LINT_BASH, DEFAULT_TEST_BASH, IMPLEMENTOR_LAYERS } from "./types.ts";
+import type {
+  ImplementorLayer,
+  IsolatedRole,
+  ProjectConfig,
+  RoleName,
+  ServiceInfo,
+} from "./types.ts";
+import {
+  DEFAULT_DEMO_BASH,
+  DEFAULT_LINT_BASH,
+  DEFAULT_TEST_BASH,
+  IMPLEMENTOR_LAYERS,
+} from "./types.ts";
 
 export const WRITE_TOOLS = new Set(["write", "edit"]);
 
@@ -74,7 +85,10 @@ export function gateWrite(
           : role === "scout"
             ? "devteam_handoff summary (scout findings)"
             : "devteam_state (and devteam_mockup for the designer)";
-    return { block: true, reason: `${role ?? "this role"} cannot edit the repository. Use ${where}.` };
+    return {
+      block: true,
+      reason: `${role ?? "this role"} cannot edit the repository. Use ${where}.`,
+    };
   }
   if (isDeniedPath(filePath, cwd)) {
     return { block: true, reason: "Writing secrets or credential files is blocked." };
@@ -86,7 +100,11 @@ export function gateWrite(
       reason: `This pass belongs to the ${service.name} service (${service.root ? `${service.root}/` : "./"}). Changing another service is a separate implementor pass — record what is needed in ${role}Notes instead.`,
     };
   }
-  if (assignedPaths?.length && !matchAnyGlob(assignedPaths, rel) && !matchAnyGlob(assignedPaths, filePath)) {
+  if (
+    assignedPaths?.length &&
+    !matchAnyGlob(assignedPaths, rel) &&
+    !matchAnyGlob(assignedPaths, filePath)
+  ) {
     return {
       block: true,
       reason: `This subagent owns only ${assignedPaths.join(", ")}. Another subagent is editing the rest of the tree right now — record anything else you need in ${role}Notes instead.`,
@@ -124,25 +142,47 @@ export function gateBash(
     const ok =
       /^(git status|git diff|git log|git rev-parse)\b/.test(cmd) ||
       commandMatchesAllowlist(cmd, ["git status", "git diff", "git log", "git rev-parse"]);
-    if (!ok) return { block: true, reason: "Commit-message role may only run git status, git diff, git log, and git rev-parse." };
+    if (!ok)
+      return {
+        block: true,
+        reason:
+          "Commit-message role may only run git status, git diff, git log, and git rev-parse.",
+      };
     if (/\bcommit\b/.test(cmd) && !/^git log\b/.test(cmd)) {
       return { block: true, reason: "Auto-commit is disabled." };
     }
     return { block: false };
   }
 
-  if (role === "planner" || role === "designer" || role === "plan_critic" || role === "design_critic" || role === "planner_orchestrator" || role === "scout" || role === "orchestrator" || role === "reviewer") {
+  if (
+    role === "planner" ||
+    role === "designer" ||
+    role === "plan_critic" ||
+    role === "design_critic" ||
+    role === "planner_orchestrator" ||
+    role === "scout" ||
+    role === "orchestrator" ||
+    role === "reviewer"
+  ) {
     const readOnly =
       /^(git |ls |cat |head |tail |rg |grep |find |wc |file )/.test(cmd) ||
       /^(git status|git diff|git log|git rev-parse|ls|pwd)\b/.test(cmd);
-    if (!readOnly) return { block: true, reason: `${role} may only run read-only inspection commands.` };
+    if (!readOnly)
+      return { block: true, reason: `${role} may only run read-only inspection commands.` };
     if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
     return { block: false };
   }
 
   if (role === "tester") {
-    const allow = [...DEFAULT_TEST_BASH, ...(config?.bash?.test ?? []), ...serviceCommands(services, "test")];
-    if (!commandMatchesAllowlist(cmd, allow) && !/^(cd .+ && )?(npm|pnpm|yarn|pytest|go|cargo|dotnet)\b/.test(cmd)) {
+    const allow = [
+      ...DEFAULT_TEST_BASH,
+      ...(config?.bash?.test ?? []),
+      ...serviceCommands(services, "test"),
+    ];
+    if (
+      !commandMatchesAllowlist(cmd, allow) &&
+      !/^(cd .+ && )?(npm|pnpm|yarn|pytest|go|cargo|dotnet)\b/.test(cmd)
+    ) {
       // still allow common test runners even if not exact
       if (!/\b(test|pytest|vitest|jest)\b/.test(cmd)) {
         return { block: true, reason: "Tester may only run the agreed test commands." };
@@ -153,9 +193,34 @@ export function gateBash(
   }
 
   if (role === "linter") {
-    const allow = [...DEFAULT_LINT_BASH, ...(config?.bash?.lint ?? []), ...serviceCommands(services, "lint")];
-    if (!commandMatchesAllowlist(cmd, allow) && !/\b(lint|eslint|ruff|clippy|prettier|format)\b/.test(cmd)) {
+    const allow = [
+      ...DEFAULT_LINT_BASH,
+      ...(config?.bash?.lint ?? []),
+      ...serviceCommands(services, "lint"),
+    ];
+    if (
+      !commandMatchesAllowlist(cmd, allow) &&
+      !/\b(lint|eslint|ruff|clippy|prettier|format)\b/.test(cmd)
+    ) {
       return { block: true, reason: "Linter may only run lint commands." };
+    }
+    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
+    return { block: false };
+  }
+  if (role === "demo") {
+    const allow = [
+      ...DEFAULT_DEMO_BASH,
+      ...(config?.bash?.demo ?? []),
+      ...serviceCommands(services, "serve"),
+    ];
+    if (
+      !commandMatchesAllowlist(cmd, allow) &&
+      !/\b(playwright|headed|xvfb|serve|dev|start)\b/.test(cmd)
+    ) {
+      return {
+        block: true,
+        reason: "Demo may only run the agreed serve command and headed Playwright.",
+      };
     }
     if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
     return { block: false };

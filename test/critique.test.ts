@@ -42,12 +42,17 @@ test("formatCritiqueForPlanner splits accepted and rejected", () => {
 
 test("withOtherOption appends a custom-answer entry once", () => {
   assert.deepEqual(withOtherOption(["Accept", "Reject"]), ["Accept", "Reject", OTHER_OPTION]);
-  assert.equal(withOtherOption(["A", OTHER_OPTION]).filter((item) => item === OTHER_OPTION).length, 1);
+  assert.equal(
+    withOtherOption(["A", OTHER_OPTION]).filter((item) => item === OTHER_OPTION).length,
+    1,
+  );
 });
 
 test("formatAskAnswers prefers custom text", () => {
   assert.equal(
-    formatAskAnswers([{ id: "q1", question: "Who?", selected: [OTHER_OPTION], custom: "Admins only" }]),
+    formatAskAnswers([
+      { id: "q1", question: "Who?", selected: [OTHER_OPTION], custom: "Admins only" },
+    ]),
     "Admins only",
   );
 });

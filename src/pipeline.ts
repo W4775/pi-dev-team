@@ -63,7 +63,15 @@ function layersFromNotes(
  * that implementor, even if the repo has that stack.
  */
 export function implementorAllowList(
-  run: Pick<RunState, "layersNeeded" | "filesToChange" | "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes">,
+  run: Pick<
+    RunState,
+    | "layersNeeded"
+    | "filesToChange"
+    | "databaseNotes"
+    | "backendNotes"
+    | "frontendNotes"
+    | "generalNotes"
+  >,
 ): ImplementorLayer[] {
   const listed = layersListed(run.layersNeeded);
   const fromNotes = layersFromNotes(run);
@@ -81,7 +89,13 @@ export function implementorAllowList(
 export function neededImplementors(
   run: Pick<
     RunState,
-    "workItems" | "layersNeeded" | "filesToChange" | "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes"
+    | "workItems"
+    | "layersNeeded"
+    | "filesToChange"
+    | "databaseNotes"
+    | "backendNotes"
+    | "frontendNotes"
+    | "generalNotes"
   >,
 ): ImplementorLayer[] {
   const fromItems = layersFromItems(run.workItems);
@@ -112,6 +126,24 @@ export function shouldOfferMockup(
   const listed = layersListed(run.layersNeeded);
   return listed.includes("frontend") && uiSurfaceOf(run) === "web";
 }
+export function shouldOfferDemo(
+  run: Pick<RunState, "layersNeeded" | "uiSurface" | "stack" | "wantDemo">,
+): boolean {
+  if (run.wantDemo !== true) return false;
+  return shouldOfferMockup(run);
+}
+
+export function proceedAfterLint(run: RunState): RunState {
+  if (shouldOfferDemo(run)) {
+    return goToStage(stamp(run, { pauseReason: undefined }), "demo", { currentRole: "demo" });
+  }
+  if (run.wantDemo === undefined && shouldOfferMockup(run)) {
+    return goToStage(stamp(run, { pauseReason: undefined }), "demo_opt_in");
+  }
+  return goToStage(stamp(run, { pauseReason: undefined }), "commit_message", {
+    currentRole: "commit_message",
+  });
+}
 
 export function nextAfterPlanCritic(run: RunState): Stage {
   return proceedAfterPlan(run).stage;
@@ -122,7 +154,9 @@ export function proceedAfterPlan(run: RunState): RunState {
   if (run.wantMockup === true && shouldOfferMockup(run)) {
     return goToStage(stamp(run, { pauseReason: undefined }), "designer");
   }
-  return startImplementation(stamp(run, { wantMockup: run.wantMockup === true, pauseReason: undefined }));
+  return startImplementation(
+    stamp(run, { wantMockup: run.wantMockup === true, pauseReason: undefined }),
+  );
 }
 
 export function parseYesNo(text: string): boolean | null {
@@ -144,6 +178,7 @@ export function autoResumeGate(run: RunState): RunState {
   if (run.stage === "mockup_opt_in") return applySkip(run);
   if (run.stage === "build_it_pause") return applyContinue(run);
   if (run.pauseReason === "plan_rewrite") return applyContinue(run);
+  if (run.stage === "demo_opt_in") return applySkip(run);
   if (
     run.pauseReason === "fix_review_max" ||
     run.pauseReason === "fix_test_max" ||
@@ -152,7 +187,11 @@ export function autoResumeGate(run: RunState): RunState {
   ) {
     return applyContinue(run);
   }
-  if (run.stage === "implement" && failedItems(run.workItems).length && !itemsRemaining(run.workItems).length) {
+  if (
+    run.stage === "implement" &&
+    failedItems(run.workItems).length &&
+    !itemsRemaining(run.workItems).length
+  ) {
     return retryableItems(run.workItems).length ? applyContinue(run) : applySkip(run);
   }
   if (run.stage === "implement") {
@@ -162,7 +201,9 @@ export function autoResumeGate(run: RunState): RunState {
       failedItems(itemsForLayer(run.workItems, layer)).length &&
       !layerRemaining(run.workItems, layer).length
     ) {
-      return retryableItems(itemsForLayer(run.workItems, layer)).length ? applyContinue(run) : applySkip(run);
+      return retryableItems(itemsForLayer(run.workItems, layer)).length
+        ? applyContinue(run)
+        : applySkip(run);
     }
   }
   return run;
@@ -175,6 +216,7 @@ function stamp(run: RunState, patch: Partial<RunState>): RunState {
 export function pauseForStage(stage: Stage): PauseReason | undefined {
   if (stage === "plan_review") return "plan_review";
   if (stage === "mockup_opt_in") return "mockup_opt_in";
+  if (stage === "demo_opt_in") return "demo_opt_in";
   if (stage === "build_it_pause") return "build_it";
   return undefined;
 }
@@ -209,7 +251,9 @@ export function applyStop(run: RunState): RunState {
 
 export function applySkip(run: RunState): RunState {
   if (run.pipelineLocked) return run;
-  const current = run.halted ? stamp(run, { halted: false, lastError: undefined, currentStatus: undefined }) : run;
+  const current = run.halted
+    ? stamp(run, { halted: false, lastError: undefined, currentStatus: undefined })
+    : run;
 
   if (current.pauseReason === "plan_rewrite") {
     const restored = stamp(current, {
@@ -231,6 +275,9 @@ export function applySkip(run: RunState): RunState {
 
   if (current.stage === "mockup_opt_in") {
     return proceedAfterPlan(stamp(current, { wantMockup: false }));
+  }
+  if (current.stage === "demo_opt_in") {
+    return proceedAfterLint(stamp(current, { wantDemo: false }));
   }
 
   if (current.stage === "designer" || current.stage === "design_critic") {
@@ -254,7 +301,10 @@ export function applySkip(run: RunState): RunState {
 
   if (current.stage === "implement") {
     const layer = activeImplementLayer(current) ?? "general";
-    return enterLayerReview(stamp(current, { workItems: markLayerSkipped(current.workItems, layer) }), layer);
+    return enterLayerReview(
+      stamp(current, { workItems: markLayerSkipped(current.workItems, layer) }),
+      layer,
+    );
   }
 
   if (
@@ -265,18 +315,29 @@ export function applySkip(run: RunState): RunState {
     return afterLayerReviewPass(stamp(current, { pauseReason: undefined }));
   }
 
-  if (current.stage === "tester" || current.stage === "fix_test" || current.pauseReason === "fix_test_max") {
+  if (
+    current.stage === "tester" ||
+    current.stage === "fix_test" ||
+    current.pauseReason === "fix_test_max"
+  ) {
     return goToStage(stamp(current, { pauseReason: undefined }), "linter");
   }
 
-  if (current.stage === "linter" || current.stage === "fix_lint" || current.pauseReason === "fix_lint_max") {
-    return goToStage(stamp(current, { pauseReason: undefined }), "commit_message");
+  if (
+    current.stage === "linter" ||
+    current.stage === "fix_lint" ||
+    current.pauseReason === "fix_lint_max"
+  ) {
+    return proceedAfterLint(stamp(current, { pauseReason: undefined }));
   }
 
   return current === run ? run : current;
 }
 
-function withLayerServices(run: RunState, layer: ImplementorLayer | undefined): Pick<RunState, "serviceQueue" | "serviceIndex" | "currentService"> {
+function withLayerServices(
+  run: RunState,
+  layer: ImplementorLayer | undefined,
+): Pick<RunState, "serviceQueue" | "serviceIndex" | "currentService"> {
   const queue = serviceQueueForLayer(run.stack?.services, layer);
   return {
     serviceQueue: queue,
@@ -306,12 +367,18 @@ export function filesForLayer(run: RunState, layer: ImplementorLayer | undefined
   return run.filesToChange?.[layer] ?? [];
 }
 
-export function reviewScope(run: RunState): { reviewLayer?: ImplementorLayer; reviewFiles: string[] } {
+export function reviewScope(run: RunState): {
+  reviewLayer?: ImplementorLayer;
+  reviewFiles: string[];
+} {
   const layer = run.reviewLayer ?? activeImplementLayer(run);
   return { reviewLayer: layer, reviewFiles: filesForLayer(run, layer) };
 }
 
-function markLayerSkipped(items: RunState["workItems"], layer: ImplementorLayer): RunState["workItems"] {
+function markLayerSkipped(
+  items: RunState["workItems"],
+  layer: ImplementorLayer,
+): RunState["workItems"] {
   if (!items?.length) return items;
   return items.map((item) =>
     item.layer === layer && (item.status === "pending" || item.status === "running")
@@ -405,6 +472,7 @@ export function stageForRole(role: RoleName | undefined): Stage | undefined {
     role === "reviewer" ||
     role === "tester" ||
     role === "linter" ||
+    role === "demo" ||
     role === "commit_message"
   ) {
     return role;
@@ -420,7 +488,11 @@ export function stageForRole(role: RoleName | undefined): Stage | undefined {
 
 export function attachRunForResume(run: RunState): RunState {
   const interactiveRole =
-    run.stage === "planner" ? "planner" : run.stage === "designer" ? "designer" : run.interactiveRole;
+    run.stage === "planner"
+      ? "planner"
+      : run.stage === "designer"
+        ? "designer"
+        : run.interactiveRole;
   return stamp(run, {
     pipelineLocked: false,
     pendingHandoff: undefined,
@@ -451,6 +523,9 @@ export function continueHint(run: RunState): string {
   if (run.stage === "designer" && !run.mockupPath) {
     return "Designer is still in this chat. Wait for a mockup, or /devteam skip to implement without one.";
   }
+  if (run.stage === "demo_opt_in") {
+    return "Answer yes to watch a live demo, or /devteam skip to finish without one.";
+  }
   return `Nothing to continue at stage ${run.stage}. Try /devteam status.`;
 }
 
@@ -460,12 +535,20 @@ export function applyContinue(run: RunState): RunState {
     ? stamp(run, { halted: false, lastError: undefined, currentStatus: undefined })
     : run;
 
-  if (run.halted && (needsParentKick(current.stage) || needsIsolatedChild(current.stage) || needsUserReview(current.stage))) {
+  if (
+    run.halted &&
+    (needsParentKick(current.stage) ||
+      needsIsolatedChild(current.stage) ||
+      needsUserReview(current.stage))
+  ) {
     return current;
   }
 
   if (current.stage === "mockup_opt_in") {
     return goToStage(stamp(current, { wantMockup: true }), "designer");
+  }
+  if (current.stage === "demo_opt_in") {
+    return goToStage(stamp(current, { wantDemo: true }), "demo", { currentRole: "demo" });
   }
 
   if (current.pauseReason === "plan_rewrite") {
@@ -497,7 +580,9 @@ export function applyContinue(run: RunState): RunState {
 
   if (current.stage === "implement") {
     const layer = activeImplementLayer(current);
-    const retry = retryableItems(layer ? itemsForLayer(current.workItems, layer) : current.workItems);
+    const retry = retryableItems(
+      layer ? itemsForLayer(current.workItems, layer) : current.workItems,
+    );
     if (retry.length) {
       const ids = new Set(retry.map((item) => item.id));
       return stamp(current, {
@@ -523,7 +608,7 @@ export function applyContinue(run: RunState): RunState {
     return goToStage(stamp(current, { pauseReason: undefined }), "linter");
   }
   if (current.pauseReason === "fix_lint_max") {
-    return goToStage(stamp(current, { pauseReason: undefined }), "commit_message");
+    return proceedAfterLint(stamp(current, { pauseReason: undefined }));
   }
   if (current.pauseReason === "design_reject_max") {
     return startImplementation(stamp(current, { pauseReason: undefined, wantMockup: true }));
@@ -531,11 +616,14 @@ export function applyContinue(run: RunState): RunState {
 
   if (current.stage === "error") {
     const stage = stageForRole(current.currentRole) ?? "plan_critic";
-    return goToStage(stamp(current, { lastError: undefined }), stage, { currentRole: current.currentRole });
+    return goToStage(stamp(current, { lastError: undefined }), stage, {
+      currentRole: current.currentRole,
+    });
   }
 
   if (current.stage === "planner") {
-    if (current.spec?.trim() && !current.planCritique?.reviewed) return applyHandoff(current, "plan_ready");
+    if (current.spec?.trim() && !current.planCritique?.reviewed)
+      return applyHandoff(current, "plan_ready");
     return current === run ? run : current;
   }
 
@@ -545,7 +633,11 @@ export function applyContinue(run: RunState): RunState {
   }
 
   if (needsIsolatedChild(current.stage)) {
-    return stamp(current, { lastError: undefined, pendingHandoff: undefined, pipelineLocked: false });
+    return stamp(current, {
+      lastError: undefined,
+      pendingHandoff: undefined,
+      pipelineLocked: false,
+    });
   }
 
   return current === run ? run : current;
@@ -553,6 +645,11 @@ export function applyContinue(run: RunState): RunState {
 
 export function acceptMockupChoice(run: RunState, want: boolean): RunState {
   if (run.stage !== "mockup_opt_in") return run;
+  return want ? applyContinue(run) : applySkip(run);
+}
+
+export function acceptDemoChoice(run: RunState, want: boolean): RunState {
+  if (run.stage !== "demo_opt_in") return run;
   return want ? applyContinue(run) : applySkip(run);
 }
 
@@ -587,7 +684,12 @@ export function activeRole(run: RunState): RoleName | undefined {
   if (run.stage === "scout_orchestrate") return "planner_orchestrator";
   if (run.stage === "scout") return "scout";
   if (run.stage === "orchestrate") return "orchestrator";
-  if (run.stage === "implement" || run.stage === "fix_review" || run.stage === "fix_test" || run.stage === "fix_lint") {
+  if (
+    run.stage === "implement" ||
+    run.stage === "fix_review" ||
+    run.stage === "fix_test" ||
+    run.stage === "fix_lint"
+  ) {
     return run.implementorQueue[run.implementorIndex] ?? run.currentRole;
   }
   if (run.stage === "planner") return "planner";
@@ -597,6 +699,7 @@ export function activeRole(run: RunState): RoleName | undefined {
   if (run.stage === "reviewer") return "reviewer";
   if (run.stage === "tester") return "tester";
   if (run.stage === "linter") return "linter";
+  if (run.stage === "demo") return "demo";
   if (run.stage === "commit_message") return "commit_message";
   return run.currentRole;
 }
@@ -683,7 +786,9 @@ export function applyHandoff(
       if (cleared.stage === "design_critic" || cleared.currentRole === "design_critic") {
         const rejects = cleared.designRejectCount + 1;
         if (rejects >= MAX_DESIGN_REJECTS) {
-          return startImplementation(stamp(cleared, { designRejectCount: rejects, wantMockup: true }));
+          return startImplementation(
+            stamp(cleared, { designRejectCount: rejects, wantMockup: true }),
+          );
         }
         return goToStage(stamp(cleared, { designRejectCount: rejects }), "designer");
       }
@@ -720,7 +825,9 @@ export function applyHandoff(
     case "work_planned": {
       const allow = implementorAllowList(cleared);
       const prepared = applyServiceDefaults(cleared.workItems ?? [], cleared.stack?.services);
-      const workItems = allow.length ? prepared.filter((item) => allow.includes(item.layer)) : prepared;
+      const workItems = allow.length
+        ? prepared.filter((item) => allow.includes(item.layer))
+        : prepared;
       const withServices = stamp(cleared, { workItems });
       if (!withServices.workItems?.length) {
         return startSequentialImplementation(withServices);
@@ -760,6 +867,9 @@ export function applyHandoff(
       if (cleared.stage === "tester" || cleared.stage === "fix_test") {
         return goToStage(cleared, "linter", { currentRole: "linter" });
       }
+      if (cleared.stage === "linter" || cleared.stage === "fix_lint") {
+        return proceedAfterLint(stamp(cleared, { pauseReason: undefined }));
+      }
       return goToStage(cleared, "commit_message", { currentRole: "commit_message" });
 
     case "qa_fail": {
@@ -767,18 +877,38 @@ export function applyHandoff(
         if (!canFix(cleared, "review")) {
           return afterLayerReviewPass(stamp(cleared, { pauseReason: undefined }));
         }
-        return startFix(cleared, "fix_review", "review", filesFromFindings(cleared.reviewFindings), globs);
+        return startFix(
+          cleared,
+          "fix_review",
+          "review",
+          filesFromFindings(cleared.reviewFindings),
+          globs,
+        );
       }
       if (cleared.stage === "tester" || cleared.stage === "fix_test") {
         if (!canFix(cleared, "test")) {
-          return goToStage(stamp(cleared, { pauseReason: undefined }), "linter", { currentRole: "linter" });
+          return goToStage(stamp(cleared, { pauseReason: undefined }), "linter", {
+            currentRole: "linter",
+          });
         }
-        return startFix(cleared, "fix_test", "test", filesFromFindings(cleared.reviewFindings), globs);
+        return startFix(
+          cleared,
+          "fix_test",
+          "test",
+          filesFromFindings(cleared.reviewFindings),
+          globs,
+        );
       }
       if (!canFix(cleared, "lint")) {
-        return goToStage(stamp(cleared, { pauseReason: undefined }), "commit_message", { currentRole: "commit_message" });
+        return proceedAfterLint(stamp(cleared, { pauseReason: undefined }));
       }
-      return startFix(cleared, "fix_lint", "lint", filesFromFindings(cleared.reviewFindings), globs);
+      return startFix(
+        cleared,
+        "fix_lint",
+        "lint",
+        filesFromFindings(cleared.reviewFindings),
+        globs,
+      );
     }
 
     case "commit_drafted":
@@ -807,6 +937,7 @@ export function needsIsolatedChild(stage: Stage): boolean {
     stage === "reviewer" ||
     stage === "tester" ||
     stage === "linter" ||
+    stage === "demo" ||
     stage === "commit_message"
   );
 }
@@ -840,7 +971,9 @@ export function applyCritiqueDecisions(
   const byId = new Map(decisions.map((entry) => [entry.id, entry]));
   const items = critiqueItems(run).map((item) => {
     const hit = byId.get(item.id);
-    return hit ? { ...item, decision: hit.decision, userNote: hit.userNote } : { ...item, decision: item.decision ?? "reject" };
+    return hit
+      ? { ...item, decision: hit.decision, userNote: hit.userNote }
+      : { ...item, decision: item.decision ?? "reject" };
   });
   const next = stampCritique(run, items, true);
   if (!items.some((item) => item.decision === "accept")) return proceedAfterPlan(next);
@@ -867,9 +1000,14 @@ function notesLookLikeApproval(notes: string | undefined): boolean {
 }
 
 /** When a child exits cleanly without calling handoff, recover the intended action from run state. */
-export function inferHandoffAction(role: RoleName | undefined, run: RunState): HandoffAction | undefined {
-  if (role === "plan_critic") return notesLookLikeApproval(run.planCritique?.notes) ? "critic_approve" : "critic_revise";
-  if (role === "design_critic") return notesLookLikeApproval(run.designCritiqueNotes) ? "critic_approve" : "critic_revise";
+export function inferHandoffAction(
+  role: RoleName | undefined,
+  run: RunState,
+): HandoffAction | undefined {
+  if (role === "plan_critic")
+    return notesLookLikeApproval(run.planCritique?.notes) ? "critic_approve" : "critic_revise";
+  if (role === "design_critic")
+    return notesLookLikeApproval(run.designCritiqueNotes) ? "critic_approve" : "critic_revise";
   if (role === "planner_orchestrator") return run.scoutItems?.length ? "scout_planned" : undefined;
   if (role === "scout") return "scout_done";
   if (role === "orchestrator") return run.workItems?.length ? "work_planned" : undefined;
@@ -877,8 +1015,12 @@ export function inferHandoffAction(role: RoleName | undefined, run: RunState): H
     return "implementor_done";
   }
   if (role === "reviewer") return hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "tester") return run.testFailed || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "linter") return run.lintErrors || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "commit_message") return run.commitMessageDraft?.trim() ? "commit_drafted" : undefined;
+  if (role === "tester")
+    return run.testFailed || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
+  if (role === "linter")
+    return run.lintErrors || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
+  if (role === "demo") return "qa_pass";
+  if (role === "commit_message")
+    return run.commitMessageDraft?.trim() ? "commit_drafted" : undefined;
   return undefined;
 }

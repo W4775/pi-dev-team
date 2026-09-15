@@ -95,36 +95,56 @@ test("isOmpHost detects Oh My Pi from argv, exec path and OMP_ vars", () => {
 
 test("getPiInvocation matches Oh My Pi nested launch", () => {
   const args = ["--mode", "json", "-p"];
-  assert.deepEqual(getPiInvocation(args, { PI_SUBPROCESS_CMD: "/opt/omp" }, { platform: "linux" }), {
-    command: "/opt/omp",
-    args,
-    shell: false,
-  });
   assert.deepEqual(
-    getPiInvocation(args, { OH_MY_PI: "1" }, { argv: ["node"], execPath: "C:/nodejs/node.exe", platform: "win32" }),
+    getPiInvocation(args, { PI_SUBPROCESS_CMD: "/opt/omp" }, { platform: "linux" }),
+    {
+      command: "/opt/omp",
+      args,
+      shell: false,
+    },
+  );
+  assert.deepEqual(
+    getPiInvocation(
+      args,
+      { OH_MY_PI: "1" },
+      { argv: ["node"], execPath: "C:/nodejs/node.exe", platform: "win32" },
+    ),
     { command: "omp.cmd", args, shell: true },
   );
   assert.deepEqual(
     getPiInvocation(
       args,
       { OH_MY_PI: "1" },
-      { argv: ["bun", "/$bunfs/root/omp.js"], execPath: "B:/BUN/root/omp-windows-x64", platform: "win32" },
+      {
+        argv: ["bun", "/$bunfs/root/omp.js"],
+        execPath: "B:/BUN/root/omp-windows-x64",
+        platform: "win32",
+      },
     ),
     { command: "B:/BUN/root/omp-windows-x64", args, shell: false },
   );
 });
 
 test("parseUnknownFlags reads the flag names out of a host rejection", () => {
-  assert.deepEqual(parseUnknownFlags("Error: unknown flags: -a, --skill, --skill\nRun `omp --help`"), [
-    "-a",
-    "--skill",
-  ]);
+  assert.deepEqual(
+    parseUnknownFlags("Error: unknown flags: -a, --skill, --skill\nRun `omp --help`"),
+    ["-a", "--skill"],
+  );
   assert.deepEqual(parseUnknownFlags("error: unrecognized option '--thinking'"), ["--thinking"]);
   assert.deepEqual(parseUnknownFlags("plan critic rejected the spec"), []);
 });
 
 test("stripFlags drops rejected flags with their values but keeps the prompt", () => {
-  const args = ["--mode", "json", "-a", "--skill", "/skills/to-spec", "--tools", "read", "review --skill now"];
+  const args = [
+    "--mode",
+    "json",
+    "-a",
+    "--skill",
+    "/skills/to-spec",
+    "--tools",
+    "read",
+    "review --skill now",
+  ];
   assert.deepEqual(stripFlags(args, ["-a", "--skill"]), [
     "--mode",
     "json",
@@ -172,7 +192,12 @@ test("buildChildCliArgs reuses flags the host already rejected", () => {
 });
 
 test("mapToolsForHost replaces Pi find/ls with Oh My Pi glob", () => {
-  assert.deepEqual(mapToolsForHost(["read", "grep", "find", "ls", "bash"], true), ["read", "grep", "glob", "bash"]);
+  assert.deepEqual(mapToolsForHost(["read", "grep", "find", "ls", "bash"], true), [
+    "read",
+    "grep",
+    "glob",
+    "bash",
+  ]);
   assert.deepEqual(mapToolsForHost(["read", "grep", "find", "ls", "bash"], false), [
     "read",
     "grep",
@@ -252,18 +277,40 @@ test("planner orchestrator and scout tools are read-only", () => {
 });
 
 test("childProcessEnv carries service and task id", () => {
-  const env = childProcessEnv("backend", "/tmp/run.json", {}, { serviceName: "api", taskId: "route" });
+  const env = childProcessEnv(
+    "backend",
+    "/tmp/run.json",
+    {},
+    { serviceName: "api", taskId: "route" },
+  );
   assert.equal(env.DEVTEAM_SERVICE, "api");
   assert.equal(env.DEVTEAM_TASK, "route");
 });
 
 test("child prompt names the role's tool-call budget", () => {
-  const backend = childUserPrompt("backend", "Add a route", [], undefined, undefined, undefined, 200);
+  const backend = childUserPrompt(
+    "backend",
+    "Add a route",
+    [],
+    undefined,
+    undefined,
+    undefined,
+    200,
+  );
   assert.match(backend, /Stay under 200 tool calls/);
-  const reviewer = childUserPrompt("reviewer", "Review the diff", [], undefined, undefined, undefined, 200, {
-    reviewLayer: "backend",
-    reviewFiles: ["src/server/**"],
-  });
+  const reviewer = childUserPrompt(
+    "reviewer",
+    "Review the diff",
+    [],
+    undefined,
+    undefined,
+    undefined,
+    200,
+    {
+      reviewLayer: "backend",
+      reviewFiles: ["src/server/**"],
+    },
+  );
   assert.match(reviewer, /Stay under 200 tool calls/);
   assert.match(reviewer, /backend layer only/);
   assert.match(reviewer, /src\/server\/\*\*/);
@@ -280,7 +327,10 @@ test("implementor tools include edit and write", () => {
 test("loadDevteamConfig requires trust", () => {
   const cwd = mkdtempSync(join(tmpdir(), "devteam-cfg-"));
   mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "devteam.json"), JSON.stringify({ skills: { frontend: ["vue"] } }));
+  writeFileSync(
+    join(cwd, ".pi", "devteam.json"),
+    JSON.stringify({ skills: { frontend: ["vue"] } }),
+  );
   assert.equal(loadDevteamConfig(cwd, false), null);
   assert.deepEqual(loadDevteamConfig(cwd, true)?.skills?.frontend, ["vue"]);
 });
@@ -288,7 +338,10 @@ test("loadDevteamConfig requires trust", () => {
 test("loadDevteamConfig prefers .omp then .pi", () => {
   const cwd = mkdtempSync(join(tmpdir(), "devteam-cfg-omp-"));
   mkdirSync(join(cwd, ".omp"));
-  writeFileSync(join(cwd, ".omp", "devteam.json"), JSON.stringify({ skills: { frontend: ["angular"] } }));
+  writeFileSync(
+    join(cwd, ".omp", "devteam.json"),
+    JSON.stringify({ skills: { frontend: ["angular"] } }),
+  );
   assert.deepEqual(loadDevteamConfig(cwd, true, [".omp", ".pi"])?.skills?.frontend, ["angular"]);
 });
 

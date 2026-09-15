@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { emptyRun } from "../src/state.ts";
 import {
+  acceptDemoChoice,
   acceptMockupChoice,
   applyContinue,
   applyHandoff,
@@ -15,6 +16,7 @@ import {
   mapBlockedFilesToImplementors,
   nextAfterPlanCritic,
   parseLayers,
+  proceedAfterLint,
   shouldOfferMockup,
   startImplementation,
   startScouting,
@@ -71,7 +73,9 @@ test("critic approve starts implementation unless mockups were already requested
 });
 
 test("skip at mockup opt-in declines designer and starts implementation", () => {
-  const next = applySkip(run({ stage: "mockup_opt_in", layersNeeded: ["frontend"], uiSurface: "web" }));
+  const next = applySkip(
+    run({ stage: "mockup_opt_in", layersNeeded: ["frontend"], uiSurface: "web" }),
+  );
   assert.equal(next.wantMockup, false);
   assert.equal(next.stage, "orchestrate");
 });
@@ -88,9 +92,56 @@ test("chat yes/no at mockup opt-in", () => {
   assert.equal(yes.stage, "designer");
   assert.equal(no.stage, "orchestrate");
 });
+test("proceedAfterLint routes to demo, opt-in, or commit", () => {
+  const yes: Partial<RunState> = { layersNeeded: ["frontend"], uiSurface: "web", wantDemo: true };
+  assert.equal(proceedAfterLint(run(yes)).stage, "demo");
+  assert.equal(
+    proceedAfterLint(run({ layersNeeded: ["frontend"], uiSurface: "web" })).stage,
+    "demo_opt_in",
+  );
+  assert.equal(
+    proceedAfterLint(run({ layersNeeded: ["frontend"], uiSurface: "web", wantDemo: false })).stage,
+    "commit_message",
+  );
+  assert.equal(
+    proceedAfterLint(run({ layersNeeded: ["backend"], uiSurface: "web", wantDemo: true })).stage,
+    "commit_message",
+  );
+});
+
+test("demo opt-in yes/no advances or finishes", () => {
+  const waiting: Partial<RunState> = {
+    stage: "demo_opt_in",
+    layersNeeded: ["frontend"],
+    uiSurface: "web",
+  };
+  const yes = acceptDemoChoice(run(waiting), true);
+  assert.equal(yes.stage, "demo");
+  assert.equal(yes.wantDemo, true);
+  const no = acceptDemoChoice(run(waiting), false);
+  assert.equal(no.stage, "commit_message");
+  assert.equal(applySkip(run(waiting)).stage, "commit_message");
+});
+
+test("qa_pass after linter honors demo, demo lands on commit", () => {
+  const linter: Partial<RunState> = {
+    stage: "linter",
+    layersNeeded: ["frontend"],
+    uiSurface: "web",
+    wantDemo: true,
+  };
+  assert.equal(applyHandoff(run(linter), "qa_pass").stage, "demo");
+  const demo = run({ stage: "demo" });
+  assert.equal(inferHandoffAction("demo", demo), "qa_pass");
+  assert.equal(applyHandoff(demo, "qa_pass").stage, "commit_message");
+});
 
 test("skip at the leftover build-it gate starts implementation", () => {
-  const paused = run({ stage: "build_it_pause", pauseReason: "build_it", layersNeeded: ["backend"] });
+  const paused = run({
+    stage: "build_it_pause",
+    pauseReason: "build_it",
+    layersNeeded: ["backend"],
+  });
   const next = applySkip(paused);
   assert.equal(next.stage, "orchestrate");
 });
@@ -151,6 +202,7 @@ test("polyglot backends run one implementor pass per service", () => {
             skills: [],
             test: ["go test ./..."],
             lint: ["go vet ./..."],
+            serve: [],
             source: "detected",
           },
           {
@@ -162,6 +214,7 @@ test("polyglot backends run one implementor pass per service", () => {
             skills: [],
             test: ["pytest"],
             lint: ["ruff check ."],
+            serve: [],
             source: "detected",
           },
         ],
@@ -250,7 +303,9 @@ test("accepting critic items sends the planner a filtered list; rejecting all st
 });
 
 test("skip at plan critic or plan review keeps the spec and continues", () => {
-  const critic = applySkip(run({ stage: "plan_critic", layersNeeded: ["backend"], spec: "Ship it" }));
+  const critic = applySkip(
+    run({ stage: "plan_critic", layersNeeded: ["backend"], spec: "Ship it" }),
+  );
   assert.equal(critic.stage, "orchestrate");
 
   const review = applySkip(
@@ -258,19 +313,31 @@ test("skip at plan critic or plan review keeps the spec and continues", () => {
       stage: "plan_review",
       layersNeeded: ["backend"],
       spec: "Ship it",
-      planCritique: { notes: "holes", replacedScope: false, items: [{ id: "c1", title: "Hole", text: "Fix it" }] },
+      planCritique: {
+        notes: "holes",
+        replacedScope: false,
+        items: [{ id: "c1", title: "Hole", text: "Fix it" }],
+      },
     }),
   );
   assert.equal(review.stage, "orchestrate");
 });
 
 test("skip at planner with a spec starts implementation instead of another critic loop", () => {
-  const next = applySkip(run({ stage: "planner", spec: "Ship settings page", layersNeeded: ["backend"] }));
+  const next = applySkip(
+    run({ stage: "planner", spec: "Ship settings page", layersNeeded: ["backend"] }),
+  );
   assert.equal(next.stage, "orchestrate");
 });
 
 test("stop halts the current step; continue resumes it; auto-resume does not", () => {
-  const stopped = applyStop(run({ stage: "plan_critic", pipelineLocked: true, pendingHandoff: { action: "critic_revise" } }));
+  const stopped = applyStop(
+    run({
+      stage: "plan_critic",
+      pipelineLocked: true,
+      pendingHandoff: { action: "critic_revise" },
+    }),
+  );
   assert.equal(stopped.halted, true);
   assert.equal(stopped.pipelineLocked, false);
   assert.equal(stopped.pendingHandoff, undefined);
@@ -281,7 +348,10 @@ test("stop halts the current step; continue resumes it; auto-resume does not", (
 });
 
 test("design critic approve starts implementation", () => {
-  const next = applyHandoff(run({ stage: "design_critic", layersNeeded: ["frontend"] }), "critic_approve");
+  const next = applyHandoff(
+    run({ stage: "design_critic", layersNeeded: ["frontend"] }),
+    "critic_approve",
+  );
   assert.equal(next.stage, "orchestrate");
 });
 
@@ -295,10 +365,11 @@ test("empty layers needed routes to general only", () => {
 
 test("needed implementors skip layers with no work", () => {
   assert.deepEqual(neededImplementors(run({ layersNeeded: ["backend"] })), ["backend"]);
-  assert.deepEqual(
-    neededImplementors(run({ layersNeeded: ["frontend", "database", "backend"] })),
-    ["database", "backend", "frontend"],
-  );
+  assert.deepEqual(neededImplementors(run({ layersNeeded: ["frontend", "database", "backend"] })), [
+    "database",
+    "backend",
+    "frontend",
+  ]);
   assert.deepEqual(
     neededImplementors(
       run({
@@ -417,7 +488,14 @@ test("implementor_done reviews a layer before the next implementor", () => {
 test("qa_fail starts a fix round until the cap", () => {
   let current = run({
     stage: "reviewer",
-    reviewFindings: [{ axis: "spec", severity: "block", text: "- [block] src/db.ts: missing", files: ["src/db.ts"] }],
+    reviewFindings: [
+      {
+        axis: "spec",
+        severity: "block",
+        text: "- [block] src/db.ts: missing",
+        files: ["src/db.ts"],
+      },
+    ],
   });
   for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
     assert.equal(canFix(current, "review"), true);
@@ -438,7 +516,14 @@ test("qa_fail cap on a mid-pipeline layer starts the next layer", () => {
     implementorQueue: ["database", "backend"],
     implementorIndex: 0,
     layersNeeded: ["database", "backend"],
-    reviewFindings: [{ axis: "spec", severity: "block", text: "- [block] src/db.ts: missing", files: ["src/db.ts"] }],
+    reviewFindings: [
+      {
+        axis: "spec",
+        severity: "block",
+        text: "- [block] src/db.ts: missing",
+        files: ["src/db.ts"],
+      },
+    ],
   });
   for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
     current = applyHandoff(current, "qa_fail");
@@ -460,7 +545,12 @@ test("qa_fail fix round stays on the reviewed layer", () => {
       implementorQueue: ["database", "backend", "frontend"],
       layersNeeded: ["database", "backend", "frontend"],
       reviewFindings: [
-        { axis: "spec", severity: "block", text: "- [block] src/server.ts: missing", files: ["src/server.ts"] },
+        {
+          axis: "spec",
+          severity: "block",
+          text: "- [block] src/server.ts: missing",
+          files: ["src/server.ts"],
+        },
       ],
     }),
     "qa_fail",
@@ -668,8 +758,20 @@ test("continue retries failed work items; skip sends them to review", () => {
 });
 
 test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exits", () => {
-  assert.equal(inferHandoffAction("plan_critic", run({ planCritique: { notes: "Approved", replacedScope: false } })), "critic_approve");
-  assert.equal(inferHandoffAction("plan_critic", run({ planCritique: { notes: "Missing acceptance criteria for X", replacedScope: false } })), "critic_revise");
+  assert.equal(
+    inferHandoffAction(
+      "plan_critic",
+      run({ planCritique: { notes: "Approved", replacedScope: false } }),
+    ),
+    "critic_approve",
+  );
+  assert.equal(
+    inferHandoffAction(
+      "plan_critic",
+      run({ planCritique: { notes: "Missing acceptance criteria for X", replacedScope: false } }),
+    ),
+    "critic_revise",
+  );
   assert.equal(inferHandoffAction("backend", run({ stage: "implement" })), "implementor_done");
   assert.equal(inferHandoffAction("reviewer", run({ reviewFindings: [] })), "qa_pass");
   assert.equal(
@@ -677,11 +779,29 @@ test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exit
     "qa_fail",
   );
   assert.equal(
-    inferHandoffAction("orchestrator", run({ workItems: [{ id: "a", layer: "backend", title: "a", files: [], dependsOn: [], status: "pending", attempts: 0 }] })),
+    inferHandoffAction(
+      "orchestrator",
+      run({
+        workItems: [
+          {
+            id: "a",
+            layer: "backend",
+            title: "a",
+            files: [],
+            dependsOn: [],
+            status: "pending",
+            attempts: 0,
+          },
+        ],
+      }),
+    ),
     "work_planned",
   );
   assert.equal(inferHandoffAction("orchestrator", run({})), undefined);
-  assert.equal(inferHandoffAction("commit_message", run({ commitMessageDraft: "feat: x" })), "commit_drafted");
+  assert.equal(
+    inferHandoffAction("commit_message", run({ commitMessageDraft: "feat: x" })),
+    "commit_drafted",
+  );
 });
 
 test("a new job starts at the planner orchestrator", () => {
@@ -710,7 +830,10 @@ test("scout_planned with items runs scouts; empty list starts the planner", () =
   assert.equal(planned.stage, "scout");
   assert.equal(planned.currentRole, "scout");
 
-  const empty = applyHandoff(run({ stage: "scout_orchestrate", currentRole: "planner_orchestrator" }), "scout_planned");
+  const empty = applyHandoff(
+    run({ stage: "scout_orchestrate", currentRole: "planner_orchestrator" }),
+    "scout_planned",
+  );
   assert.equal(empty.stage, "planner");
 });
 
@@ -730,7 +853,9 @@ test("scout_done with remaining items stays; last scout starts the planner", () 
   const last = applyHandoff(
     run({
       stage: "scout",
-      scoutItems: [{ id: "a", title: "a", files: [], status: "done", attempts: 1, findings: "found a" }],
+      scoutItems: [
+        { id: "a", title: "a", files: [], status: "done", attempts: 1, findings: "found a" },
+      ],
     }),
     "scout_done",
   );
@@ -742,7 +867,16 @@ test("skip during scouting starts the planner with whatever findings exist", () 
   const next = applySkip(
     run({
       stage: "scout",
-      scoutItems: [{ id: "a", title: "a", files: [], status: "done", attempts: 1, findings: "routes in src/server" }],
+      scoutItems: [
+        {
+          id: "a",
+          title: "a",
+          files: [],
+          status: "done",
+          attempts: 1,
+          findings: "routes in src/server",
+        },
+      ],
     }),
   );
   assert.equal(next.stage, "planner");

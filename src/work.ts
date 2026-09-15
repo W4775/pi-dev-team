@@ -12,13 +12,19 @@ import {
 const LAYER_SET = new Set<string>(IMPLEMENTOR_LAYERS);
 
 function asLayer(value: unknown): ImplementorLayer {
-  const text = String(value ?? "").trim().toLowerCase();
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
   return LAYER_SET.has(text) ? (text as ImplementorLayer) : "general";
 }
 
 function asStatus(value: unknown): WorkItemStatus {
-  const text = String(value ?? "").trim().toLowerCase();
-  return (WORK_ITEM_STATUSES as readonly string[]).includes(text) ? (text as WorkItemStatus) : "pending";
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return (WORK_ITEM_STATUSES as readonly string[]).includes(text)
+    ? (text as WorkItemStatus)
+    : "pending";
 }
 
 function asList(value: unknown): string[] {
@@ -51,7 +57,8 @@ export function normalizeWorkItems(raw: unknown): WorkItem[] {
     }
   }
   if (source && typeof source === "object" && !Array.isArray(source)) {
-    const wrapped = (source as Record<string, unknown>).items ?? (source as Record<string, unknown>).workItems;
+    const wrapped =
+      (source as Record<string, unknown>).items ?? (source as Record<string, unknown>).workItems;
     if (Array.isArray(wrapped)) source = wrapped;
   }
   if (!Array.isArray(source)) return [];
@@ -62,7 +69,8 @@ export function normalizeWorkItems(raw: unknown): WorkItem[] {
     if (!entry || typeof entry !== "object") continue;
     const node = entry as Record<string, unknown>;
     const layer = asLayer(node.layer ?? node.role);
-    const title = String(node.title ?? node.name ?? node.task ?? "").trim() || `${layer} work ${index + 1}`;
+    const title =
+      String(node.title ?? node.name ?? node.task ?? "").trim() || `${layer} work ${index + 1}`;
     let id = String(node.id ?? "").trim() || `${layer}-${slug(title, String(index + 1))}`;
     while (used.has(id)) id = `${id}-${index + 1}`;
     used.add(id);
@@ -72,22 +80,28 @@ export function normalizeWorkItems(raw: unknown): WorkItem[] {
       layer,
       service: service || undefined,
       title,
-      details: typeof node.details === "string" && node.details.trim() ? node.details.trim() : undefined,
+      details:
+        typeof node.details === "string" && node.details.trim() ? node.details.trim() : undefined,
       files: asList(node.files ?? node.paths),
       dependsOn: asList(node.dependsOn ?? node.depends_on ?? node.after),
       status: asStatus(node.status),
       attempts: Number.isFinite(Number(node.attempts)) ? Number(node.attempts) : 0,
-      summary: typeof node.summary === "string" && node.summary.trim() ? node.summary.trim() : undefined,
+      summary:
+        typeof node.summary === "string" && node.summary.trim() ? node.summary.trim() : undefined,
       error: typeof node.error === "string" && node.error.trim() ? node.error.trim() : undefined,
     });
   }
 
   const ids = new Set(items.map((item) => item.id));
-  for (const item of items) item.dependsOn = item.dependsOn.filter((dep) => ids.has(dep) && dep !== item.id);
+  for (const item of items)
+    item.dependsOn = item.dependsOn.filter((dep) => ids.has(dep) && dep !== item.id);
   return items;
 }
 
-export function applyServiceDefaults(items: WorkItem[], services: ServiceInfo[] | undefined): WorkItem[] {
+export function applyServiceDefaults(
+  items: WorkItem[],
+  services: ServiceInfo[] | undefined,
+): WorkItem[] {
   if (!services?.length) return items;
   return items.map((item) => {
     const service = serviceByName(services, item.service);
@@ -113,7 +127,10 @@ function pathsCollide(a: string[], b: string[]): boolean {
   );
 }
 
-export function nextWave(items: WorkItem[] | undefined, maxParallel = DEFAULT_PARALLEL): WorkItem[] {
+export function nextWave(
+  items: WorkItem[] | undefined,
+  maxParallel = DEFAULT_PARALLEL,
+): WorkItem[] {
   const all = items ?? [];
   if (all.some((item) => item.status === "running")) return [];
   const limit = resolveParallel(maxParallel);
@@ -145,7 +162,10 @@ export function nextWave(items: WorkItem[] | undefined, maxParallel = DEFAULT_PA
   return [];
 }
 
-export function itemsForLayer(items: WorkItem[] | undefined, layer: ImplementorLayer | undefined): WorkItem[] {
+export function itemsForLayer(
+  items: WorkItem[] | undefined,
+  layer: ImplementorLayer | undefined,
+): WorkItem[] {
   if (!layer) return [];
   return (items ?? []).filter((item) => item.layer === layer);
 }
@@ -154,7 +174,10 @@ export function itemsRemaining<T extends { status: WorkItemStatus }>(items: T[] 
   return (items ?? []).filter((item) => item.status === "pending" || item.status === "running");
 }
 
-export function layerRemaining(items: WorkItem[] | undefined, layer: ImplementorLayer | undefined): WorkItem[] {
+export function layerRemaining(
+  items: WorkItem[] | undefined,
+  layer: ImplementorLayer | undefined,
+): WorkItem[] {
   return itemsRemaining(itemsForLayer(items, layer));
 }
 
@@ -162,7 +185,9 @@ export function failedItems<T extends { status: WorkItemStatus }>(items: T[] | u
   return (items ?? []).filter((item) => item.status === "failed");
 }
 
-export function retryableItems<T extends { status: WorkItemStatus; attempts: number }>(items: T[] | undefined): T[] {
+export function retryableItems<T extends { status: WorkItemStatus; attempts: number }>(
+  items: T[] | undefined,
+): T[] {
   return failedItems(items).filter((item) => item.attempts < MAX_WORK_ITEM_ATTEMPTS);
 }
 
@@ -174,7 +199,10 @@ export function setItemStatus(
   return (items ?? []).map((item) => (item.id === id ? { ...item, ...patch } : item));
 }
 
-export function findItem(items: WorkItem[] | undefined, id: string | undefined): WorkItem | undefined {
+export function findItem(
+  items: WorkItem[] | undefined,
+  id: string | undefined,
+): WorkItem | undefined {
   if (!id) return undefined;
   return (items ?? []).find((item) => item.id === id);
 }
@@ -187,7 +215,12 @@ export function layersFromItems(items: WorkItem[] | undefined): ImplementorLayer
 export function renderWorkItems(items: WorkItem[] | undefined): string {
   const all = items ?? [];
   if (!all.length) return "";
-  const mark: Record<WorkItemStatus, string> = { pending: " ", running: "~", done: "x", failed: "!" };
+  const mark: Record<WorkItemStatus, string> = {
+    pending: " ",
+    running: "~",
+    done: "x",
+    failed: "!",
+  };
   return all
     .map((item) => {
       const files = item.files.length ? ` — ${item.files.slice(0, 4).join(", ")}` : "";
