@@ -24,7 +24,7 @@ import {
   startSequentialImplementation,
   neededImplementors,
 } from "../src/pipeline.ts";
-import { MAX_FIX_ROUNDS } from "../src/types.ts";
+import { MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS } from "../src/types.ts";
 import type { RunState } from "../src/types.ts";
 
 function run(partial: Partial<RunState>): RunState {
@@ -132,7 +132,7 @@ test("qa_pass after linter honors demo, demo lands on review", () => {
     wantDemo: true,
   };
   assert.equal(applyHandoff(run(linter), "qa_pass").stage, "demo");
-  const demo = run({ stage: "demo" });
+  const demo = run({ stage: "demo", demoNotes: "opened settings" });
   assert.equal(inferHandoffAction("demo", demo), "qa_pass");
   assert.equal(applyHandoff(demo, "qa_pass").stage, "demo_review");
 });
@@ -257,10 +257,39 @@ test("continue at build-it starts the orchestrator", () => {
   assert.equal(next.currentRole, "orchestrator");
 });
 
-test("leftover pause gates auto-resume into the next role", () => {
+test("leftover build-it pause auto-resumes into the orchestrator", () => {
   const gated = autoResumeGate(run({ stage: "build_it_pause", layersNeeded: ["backend"] }));
   assert.equal(gated.stage, "orchestrate");
   assert.equal(gated.currentRole, "orchestrator");
+});
+
+test("autoResumeGate does not skip demo or mockup opt-in", () => {
+  const demo = run({
+    stage: "demo_opt_in",
+    layersNeeded: ["frontend"],
+    uiSurface: "web",
+  });
+  assert.equal(autoResumeGate(demo).stage, "demo_opt_in");
+  const mockup = run({
+    stage: "mockup_opt_in",
+    layersNeeded: ["frontend"],
+    uiSurface: "web",
+  });
+  assert.equal(autoResumeGate(mockup).stage, "mockup_opt_in");
+});
+
+test("autoResumeGate does not proceed past a review cap", () => {
+  const parked = run({
+    stage: "reviewer",
+    reviewLayer: "database",
+    pauseReason: "fix_review_max",
+    halted: true,
+    layersNeeded: ["database", "backend"],
+  });
+  const gated = autoResumeGate(parked);
+  assert.equal(gated.stage, "reviewer");
+  assert.equal(gated.halted, true);
+  assert.equal(gated.pauseReason, "fix_review_max");
 });
 
 test("critic revise pauses for the user instead of looping the planner", () => {
@@ -369,6 +398,24 @@ test("design critic approve starts implementation", () => {
   assert.equal(next.stage, "orchestrate");
 });
 
+test("design critic cap parks instead of looping the designer", () => {
+  let current = run({ stage: "design_critic", layersNeeded: ["frontend"] });
+  for (let i = 0; i < MAX_DESIGN_REJECTS - 1; i++) {
+    current = applyHandoff(current, "critic_revise");
+    assert.equal(current.stage, "designer");
+    current = { ...current, stage: "design_critic" };
+  }
+  const capped = applyHandoff(current, "critic_revise");
+  assert.equal(capped.halted, true);
+  assert.equal(capped.pauseReason, "design_reject_max");
+  assert.equal(capped.stage, "design_critic");
+  assert.equal(autoResumeGate(capped).stage, "design_critic");
+  const proceeded = applyContinue(capped);
+  assert.equal(proceeded.halted, false);
+  assert.equal(proceeded.stage, "orchestrate");
+  assert.equal(applySkip(capped).stage, "orchestrate");
+});
+
 test("empty layers needed routes to general only", () => {
   assert.deepEqual(parseLayers(undefined), ["general"]);
   assert.deepEqual(parseLayers([]), ["general"]);
@@ -470,7 +517,7 @@ test("plan rewrite skip restores original spec and keeps executing", () => {
   assert.equal(next.stage, "orchestrate");
 });
 
-test("implementor_done reviews a layer before the next implementor", () => {
+test("sequential implementors finish the slice then review once", () => {
   const first = applyHandoff(
     run({
       stage: "implement",
@@ -481,22 +528,17 @@ test("implementor_done reviews a layer before the next implementor", () => {
     }),
     "implementor_done",
   );
-  assert.equal(first.stage, "reviewer");
-  assert.equal(first.reviewLayer, "database");
-  assert.equal(first.currentRole, "reviewer");
+  assert.equal(first.stage, "implement");
+  assert.equal(first.currentRole, "frontend");
+  assert.equal(first.implementorIndex, 1);
 
-  const nextLayer = applyHandoff(first, "qa_pass");
-  assert.equal(nextLayer.stage, "implement");
-  assert.equal(nextLayer.currentRole, "frontend");
-  assert.equal(nextLayer.implementorIndex, 1);
-  assert.equal(nextLayer.reviewLayer, undefined);
+  const reviewed = applyHandoff(first, "implementor_done");
+  assert.equal(reviewed.stage, "reviewer");
+  assert.equal(reviewed.currentRole, "reviewer");
+  assert.equal(reviewed.reviewLayer, undefined);
 
-  const secondReview = applyHandoff(nextLayer, "implementor_done");
-  assert.equal(secondReview.stage, "reviewer");
-  assert.equal(secondReview.reviewLayer, "frontend");
-
-  const afterLast = applyHandoff(secondReview, "qa_pass");
-  assert.equal(afterLast.stage, "tester");
+  const afterReview = applyHandoff(reviewed, "qa_pass");
+  assert.equal(afterReview.stage, "tester");
 });
 
 test("qa_fail starts a fix round until the cap", () => {
@@ -519,14 +561,14 @@ test("qa_fail starts a fix round until the cap", () => {
   }
   assert.equal(canFix(current, "review"), false);
   const capped = applyHandoff(current, "qa_fail");
-  assert.equal(capped.stage, "tester");
-  assert.equal(capped.pauseReason, undefined);
+  assert.equal(capped.stage, "reviewer");
+  assert.equal(capped.halted, true);
+  assert.equal(capped.pauseReason, "fix_review_max");
 });
 
-test("qa_fail cap on a mid-pipeline layer starts the next layer", () => {
+test("qa_fail cap on review parks instead of starting the tester", () => {
   let current = run({
     stage: "reviewer",
-    reviewLayer: "database",
     implementorQueue: ["database", "backend"],
     implementorIndex: 0,
     layersNeeded: ["database", "backend"],
@@ -542,13 +584,71 @@ test("qa_fail cap on a mid-pipeline layer starts the next layer", () => {
   for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
     current = applyHandoff(current, "qa_fail");
     assert.equal(current.stage, "fix_review");
-    assert.deepEqual(current.implementorQueue, ["database"]);
     current = { ...current, stage: "reviewer", reviewFindings: current.reviewFindings };
   }
   const capped = applyHandoff(current, "qa_fail");
-  assert.equal(capped.stage, "implement");
-  assert.equal(capped.currentRole, "backend");
-  assert.equal(capped.reviewLayer, undefined);
+  assert.equal(capped.stage, "reviewer");
+  assert.equal(capped.halted, true);
+  assert.equal(capped.pauseReason, "fix_review_max");
+
+  const proceeded = applyContinue(capped);
+  assert.equal(proceeded.halted, false);
+  assert.equal(proceeded.stage, "tester");
+});
+
+test("qa_fail cap on tester parks instead of starting the linter", () => {
+  let current = run({
+    stage: "tester",
+    testFailed: true,
+    testResults: "1 failed",
+    reviewFindings: [
+      {
+        axis: "spec",
+        severity: "block",
+        text: "- [block] src/a.ts: missing test",
+        files: ["src/a.ts"],
+      },
+    ],
+  });
+  for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
+    assert.equal(canFix(current, "test"), true);
+    current = applyHandoff(current, "qa_fail");
+    assert.equal(current.stage, "fix_test");
+    current = { ...current, stage: "tester", reviewFindings: current.reviewFindings };
+  }
+  const capped = applyHandoff(current, "qa_fail");
+  assert.equal(capped.halted, true);
+  assert.equal(capped.pauseReason, "fix_test_max");
+  assert.equal(capped.stage, "tester");
+  assert.equal(applyContinue(capped).stage, "linter");
+});
+
+test("qa_fail cap on linter parks instead of drafting the commit", () => {
+  let current = run({
+    stage: "linter",
+    lintErrors: true,
+    lintResults: "2 errors",
+    reviewFindings: [
+      {
+        axis: "standards",
+        severity: "block",
+        text: "- [block] src/a.ts: unused",
+        files: ["src/a.ts"],
+      },
+    ],
+  });
+  for (let i = 0; i < MAX_FIX_ROUNDS; i++) {
+    assert.equal(canFix(current, "lint"), true);
+    current = applyHandoff(current, "qa_fail");
+    assert.equal(current.stage, "fix_lint");
+    current = { ...current, stage: "linter", reviewFindings: current.reviewFindings };
+  }
+  const capped = applyHandoff(current, "qa_fail");
+  assert.equal(capped.halted, true);
+  assert.equal(capped.pauseReason, "fix_lint_max");
+  assert.equal(capped.stage, "linter");
+  assert.equal(applyContinue(capped).stage, "commit_message");
+  assert.equal(applySkip(capped).stage, "commit_message");
 });
 
 test("qa_fail fix round stays on the reviewed layer", () => {
@@ -658,7 +758,39 @@ test("implementor_done with remaining work items in the same layer stays on impl
   assert.equal(next.stage, "implement");
 });
 
-test("implementor_done reviews a finished layer even when later work items are pending", () => {
+test("implementor_done reviews the slice once every work item is done", () => {
+  const next = applyHandoff(
+    run({
+      stage: "implement",
+      implementorQueue: ["database", "backend"],
+      workItems: [
+        {
+          id: "schema",
+          layer: "database",
+          title: "schema",
+          files: ["prisma/**"],
+          dependsOn: [],
+          status: "done",
+          attempts: 1,
+        },
+        {
+          id: "route",
+          layer: "backend",
+          title: "route",
+          files: ["src/server/**"],
+          dependsOn: [],
+          status: "done",
+          attempts: 1,
+        },
+      ],
+    }),
+    "implementor_done",
+  );
+  assert.equal(next.stage, "reviewer");
+  assert.equal(next.reviewLayer, undefined);
+});
+
+test("implementor_done keeps implementing while later work items are pending", () => {
   const next = applyHandoff(
     run({
       stage: "implement",
@@ -688,11 +820,10 @@ test("implementor_done reviews a finished layer even when later work items are p
     }),
     "implementor_done",
   );
-  assert.equal(next.stage, "reviewer");
-  assert.equal(next.reviewLayer, "database");
+  assert.equal(next.stage, "implement");
 });
 
-test("skip during implement only finishes the current layer then reviews it", () => {
+test("skip during implement sends the remaining slice to review", () => {
   const skipped = applySkip(
     run({
       stage: "implement",
@@ -723,13 +854,12 @@ test("skip during implement only finishes the current layer then reviews it", ()
     }),
   );
   assert.equal(skipped.stage, "reviewer");
-  assert.equal(skipped.reviewLayer, "database");
+  assert.equal(skipped.reviewLayer, undefined);
   assert.equal(skipped.workItems?.[0]?.status, "done");
-  assert.equal(skipped.workItems?.[1]?.status, "pending");
+  assert.equal(skipped.workItems?.[1]?.status, "done");
 
-  const nextLayer = applySkip(skipped);
-  assert.equal(nextLayer.stage, "implement");
-  assert.equal(nextLayer.currentRole, "backend");
+  const afterReview = applySkip(skipped);
+  assert.equal(afterReview.stage, "tester");
 });
 
 test("skip after the last layer review goes to tester", () => {
@@ -759,7 +889,7 @@ test("continue retries failed work items; skip sends them to review", () => {
 
   const skipped = applySkip(failed);
   assert.equal(skipped.stage, "reviewer");
-  assert.equal(skipped.reviewLayer, "backend");
+  assert.equal(skipped.reviewLayer, undefined);
 
   const autoRetry = autoResumeGate(failed);
   assert.equal(autoRetry.workItems?.[0]?.status, "pending");
@@ -786,10 +916,31 @@ test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exit
     ),
     "critic_revise",
   );
-  assert.equal(inferHandoffAction("backend", run({ stage: "implement" })), "implementor_done");
-  assert.equal(inferHandoffAction("reviewer", run({ reviewFindings: [] })), "qa_pass");
+  assert.equal(inferHandoffAction("plan_critic", run({})), undefined);
+  assert.equal(inferHandoffAction("backend", run({ stage: "implement" })), undefined);
+  assert.equal(
+    inferHandoffAction(
+      "backend",
+      run({ stage: "implement", backendNotes: "Added POST /settings" }),
+    ),
+    "implementor_done",
+  );
+  assert.equal(inferHandoffAction("reviewer", run({ reviewFindings: [] })), undefined);
+  assert.equal(
+    inferHandoffAction(
+      "reviewer",
+      run({
+        reviewFindings: [{ axis: "standards", severity: "note", text: "- [note] fine" }],
+      }),
+    ),
+    "qa_pass",
+  );
   assert.equal(
     inferHandoffAction("tester", run({ testFailed: true, reviewFindings: [] })),
+    undefined,
+  );
+  assert.equal(
+    inferHandoffAction("tester", run({ testResults: "1 failed", testFailed: true })),
     "qa_fail",
   );
   assert.equal(
@@ -812,6 +963,11 @@ test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exit
     "work_planned",
   );
   assert.equal(inferHandoffAction("orchestrator", run({})), undefined);
+  assert.equal(inferHandoffAction("demo", run({ stage: "demo" })), undefined);
+  assert.equal(
+    inferHandoffAction("demo", run({ stage: "demo", demoNotes: "clicked settings" })),
+    "qa_pass",
+  );
   assert.equal(
     inferHandoffAction("commit_message", run({ commitMessageDraft: "feat: x" })),
     "commit_drafted",
@@ -906,5 +1062,17 @@ test("inferHandoffAction recovers scout orchestrator and scout exits", () => {
     "scout_planned",
   );
   assert.equal(inferHandoffAction("planner_orchestrator", run({})), undefined);
-  assert.equal(inferHandoffAction("scout", run({ stage: "scout" })), "scout_done");
+  assert.equal(inferHandoffAction("scout", run({ stage: "scout" })), undefined);
+  assert.equal(
+    inferHandoffAction(
+      "scout",
+      run({
+        stage: "scout",
+        scoutItems: [
+          { id: "a", title: "a", files: [], status: "done", attempts: 1, findings: "found a" },
+        ],
+      }),
+    ),
+    "scout_done",
+  );
 });

@@ -5,7 +5,6 @@ import {
   failedItems,
   itemsForLayer,
   itemsRemaining,
-  layerRemaining,
   layersFromItems,
   retryableItems,
 } from "./work.ts";
@@ -184,36 +183,14 @@ export function isPaused(run: RunState): boolean {
 /** Turn a leftover idle gate into the next running stage. */
 export function autoResumeGate(run: RunState): RunState {
   if (run.halted || run.pipelineLocked) return run;
-  if (run.stage === "mockup_opt_in") return applySkip(run);
   if (run.stage === "build_it_pause") return applyContinue(run);
   if (run.pauseReason === "plan_rewrite") return applyContinue(run);
-  if (run.stage === "demo_opt_in") return applySkip(run);
-  if (
-    run.pauseReason === "fix_review_max" ||
-    run.pauseReason === "fix_test_max" ||
-    run.pauseReason === "fix_lint_max" ||
-    run.pauseReason === "design_reject_max"
-  ) {
-    return applyContinue(run);
-  }
   if (
     run.stage === "implement" &&
     failedItems(run.workItems).length &&
     !itemsRemaining(run.workItems).length
   ) {
     return retryableItems(run.workItems).length ? applyContinue(run) : applySkip(run);
-  }
-  if (run.stage === "implement") {
-    const layer = activeImplementLayer(run);
-    if (
-      layer &&
-      failedItems(itemsForLayer(run.workItems, layer)).length &&
-      !layerRemaining(run.workItems, layer).length
-    ) {
-      return retryableItems(itemsForLayer(run.workItems, layer)).length
-        ? applyContinue(run)
-        : applySkip(run);
-    }
   }
   return run;
 }
@@ -295,6 +272,10 @@ export function applySkip(run: RunState): RunState {
     });
   }
 
+  if (current.pauseReason === "design_reject_max") {
+    return startImplementation(stamp(current, { pauseReason: undefined, wantMockup: true }));
+  }
+
   if (current.stage === "designer" || current.stage === "design_critic") {
     return proceedAfterPlan(stamp(current, { wantMockup: false }));
   }
@@ -315,11 +296,7 @@ export function applySkip(run: RunState): RunState {
   }
 
   if (current.stage === "implement") {
-    const layer = activeImplementLayer(current) ?? "general";
-    return enterLayerReview(
-      stamp(current, { workItems: markLayerSkipped(current.workItems, layer) }),
-      layer,
-    );
+    return enterReview(stamp(current, { workItems: markRemainingSkipped(current.workItems) }));
   }
 
   if (
@@ -327,7 +304,7 @@ export function applySkip(run: RunState): RunState {
     current.stage === "fix_review" ||
     current.pauseReason === "fix_review_max"
   ) {
-    return afterLayerReviewPass(stamp(current, { pauseReason: undefined }));
+    return afterReviewPass(stamp(current, { pauseReason: undefined }));
   }
 
   if (
@@ -335,7 +312,9 @@ export function applySkip(run: RunState): RunState {
     current.stage === "fix_test" ||
     current.pauseReason === "fix_test_max"
   ) {
-    return goToStage(stamp(current, { pauseReason: undefined }), "linter");
+    return goToStage(stamp(current, { pauseReason: undefined }), "linter", {
+      currentRole: "linter",
+    });
   }
 
   if (
@@ -361,19 +340,6 @@ function withLayerServices(
   };
 }
 
-function isImplementorLayer(role: RoleName | undefined): role is ImplementorLayer {
-  return role === "database" || role === "backend" || role === "frontend" || role === "general";
-}
-
-/** Layer this implement/review/fix step is for. */
-export function activeImplementLayer(run: RunState): ImplementorLayer | undefined {
-  if (run.reviewLayer) return run.reviewLayer;
-  const queued = run.implementorQueue[run.implementorIndex];
-  if (queued) return queued;
-  if (isImplementorLayer(run.currentRole)) return run.currentRole;
-  return layersFromItems(run.workItems)[0];
-}
-
 export function filesForLayer(run: RunState, layer: ImplementorLayer | undefined): string[] {
   if (!layer) return [];
   const fromItems = itemsForLayer(run.workItems, layer).flatMap((item) => item.files);
@@ -386,63 +352,46 @@ export function reviewScope(run: RunState): {
   reviewLayer?: ImplementorLayer;
   reviewFiles: string[];
 } {
-  const layer = run.reviewLayer ?? activeImplementLayer(run);
-  return { reviewLayer: layer, reviewFiles: filesForLayer(run, layer) };
+  if (run.reviewLayer) {
+    return { reviewLayer: run.reviewLayer, reviewFiles: filesForLayer(run, run.reviewLayer) };
+  }
+  const fromItems = [
+    ...new Set((run.workItems ?? []).flatMap((item) => item.files).filter(Boolean)),
+  ];
+  if (fromItems.length) return { reviewFiles: fromItems };
+  const fromListed = [
+    ...new Set(IMPLEMENTOR_LAYERS.flatMap((layer) => run.filesToChange?.[layer] ?? [])),
+  ];
+  return { reviewFiles: fromListed };
 }
 
-function markLayerSkipped(
-  items: RunState["workItems"],
-  layer: ImplementorLayer,
-): RunState["workItems"] {
+function markRemainingSkipped(items: RunState["workItems"]): RunState["workItems"] {
   if (!items?.length) return items;
   return items.map((item) =>
-    item.layer === layer && (item.status === "pending" || item.status === "running")
+    item.status === "pending" || item.status === "running"
       ? { ...item, status: "done" as const, summary: item.summary ?? "skipped by user" }
       : item,
   );
 }
 
-/** After a layer finishes implementing, review that layer before later layers start. */
-export function enterLayerReview(run: RunState, layer: ImplementorLayer): RunState {
+/** After the slice is implemented, review the whole diff once. */
+export function enterReview(run: RunState): RunState {
   return goToStage(
     stamp(run, {
       reviewFindings: undefined,
       lastError: undefined,
+      reviewLayer: undefined,
     }),
     "reviewer",
     {
       currentRole: "reviewer",
-      reviewLayer: layer,
       fixRound: { ...run.fixRound, review: 0 },
     },
   );
 }
 
-/** After this layer's review passes (or is skipped/capped), implement the next layer or start tester. */
-export function afterLayerReviewPass(run: RunState): RunState {
-  const queue = neededImplementors(run);
-  const current = run.reviewLayer ?? activeImplementLayer(run);
-  const idx = current ? queue.indexOf(current) : -1;
-  const nextLayer = idx >= 0 ? queue[idx + 1] : queue[run.implementorIndex + 1];
-  if (nextLayer) {
-    const nextIndex = Math.max(0, queue.indexOf(nextLayer));
-    return goToStage(
-      stamp(run, {
-        reviewFindings: undefined,
-        lastError: undefined,
-        pauseReason: undefined,
-      }),
-      "implement",
-      {
-        implementorQueue: queue,
-        implementorIndex: nextIndex,
-        currentRole: nextLayer,
-        reviewLayer: undefined,
-        fixRound: { ...run.fixRound, review: 0 },
-        ...withLayerServices(run, nextLayer),
-      },
-    );
-  }
+/** After slice review passes (or is skipped/capped), start tester. */
+export function afterReviewPass(run: RunState): RunState {
   return goToStage(stamp(run, { pauseReason: undefined, reviewLayer: undefined }), "tester", {
     currentRole: "tester",
   });
@@ -518,6 +467,18 @@ export function attachRunForResume(run: RunState): RunState {
 }
 
 export function continueHint(run: RunState): string {
+  if (run.pauseReason === "fix_review_max") {
+    return "Review did not pass after 3 fix rounds. /devteam continue proceeds to the tester; /devteam skip does the same.";
+  }
+  if (run.pauseReason === "fix_test_max") {
+    return "Tests did not pass after 3 fix rounds. /devteam continue proceeds to the linter; /devteam skip does the same.";
+  }
+  if (run.pauseReason === "fix_lint_max") {
+    return "Lint did not pass after 3 fix rounds. /devteam continue proceeds; /devteam skip does the same.";
+  }
+  if (run.pauseReason === "design_reject_max") {
+    return "Design critic rejected the mockup twice. /devteam continue starts implementation anyway; /devteam skip does the same.";
+  }
   if (run.halted) {
     return `Stopped at ${run.stage}. /devteam continue resumes this step; /devteam skip skips it.`;
   }
@@ -529,14 +490,17 @@ export function continueHint(run: RunState): string {
   }
   if (run.stage === "implement" && failedItems(run.workItems).length) {
     return retryableItems(run.workItems).length
-      ? "A work item failed. /devteam continue retries it; /devteam skip sends remaining work in this layer to the reviewer."
-      : "Work items failed twice. /devteam continue or /devteam skip sends this layer to the reviewer.";
+      ? "A work item failed. /devteam continue retries it; /devteam skip sends remaining work to the reviewer."
+      : "Work items failed twice. /devteam continue or /devteam skip sends this slice to the reviewer.";
   }
   if (run.stage === "planner" && !run.spec?.trim()) {
     return "Planner is still in this chat. Answer with the ask picker until a spec is stored, then it will hand off to the plan critic.";
   }
   if (run.stage === "designer" && !run.mockupPath) {
     return "Designer is still in this chat. Wait for a mockup, or /devteam skip to implement without one.";
+  }
+  if (run.stage === "mockup_opt_in") {
+    return "Want an HTML mockup before implementation? Answer yes or no, or /devteam skip to implement without one.";
   }
   if (run.stage === "demo_opt_in") {
     return "Answer yes to watch a live demo, or /devteam skip to finish without one.";
@@ -552,6 +516,21 @@ export function applyContinue(run: RunState): RunState {
   const current = run.halted
     ? stamp(run, { halted: false, lastError: undefined, currentStatus: undefined })
     : run;
+
+  if (current.pauseReason === "fix_review_max") {
+    return afterReviewPass(stamp(current, { pauseReason: undefined }));
+  }
+  if (current.pauseReason === "fix_test_max") {
+    return goToStage(stamp(current, { pauseReason: undefined }), "linter", {
+      currentRole: "linter",
+    });
+  }
+  if (current.pauseReason === "fix_lint_max") {
+    return proceedAfterLint(stamp(current, { pauseReason: undefined }));
+  }
+  if (current.pauseReason === "design_reject_max") {
+    return startImplementation(stamp(current, { pauseReason: undefined, wantMockup: true }));
+  }
 
   if (
     run.halted &&
@@ -597,10 +576,7 @@ export function applyContinue(run: RunState): RunState {
   }
 
   if (current.stage === "implement") {
-    const layer = activeImplementLayer(current);
-    const retry = retryableItems(
-      layer ? itemsForLayer(current.workItems, layer) : current.workItems,
-    );
+    const retry = retryableItems(current.workItems);
     if (retry.length) {
       const ids = new Set(retry.map((item) => item.id));
       return stamp(current, {
@@ -611,25 +587,9 @@ export function applyContinue(run: RunState): RunState {
         ),
       });
     }
-    if (layer && failedItems(itemsForLayer(current.workItems, layer)).length) {
-      return enterLayerReview(current, layer);
-    }
     if (failedItems(current.workItems).length) {
-      return enterLayerReview(current, layer ?? "general");
+      return enterReview(current);
     }
-  }
-
-  if (current.pauseReason === "fix_review_max") {
-    return afterLayerReviewPass(stamp(current, { pauseReason: undefined }));
-  }
-  if (current.pauseReason === "fix_test_max") {
-    return goToStage(stamp(current, { pauseReason: undefined }), "linter");
-  }
-  if (current.pauseReason === "fix_lint_max") {
-    return proceedAfterLint(stamp(current, { pauseReason: undefined }));
-  }
-  if (current.pauseReason === "design_reject_max") {
-    return startImplementation(stamp(current, { pauseReason: undefined, wantMockup: true }));
   }
 
   if (current.stage === "error") {
@@ -686,6 +646,17 @@ export function applyDemoReview(run: RunState, accepted: boolean, feedback?: str
 
 export function canFix(run: RunState, kind: "review" | "test" | "lint"): boolean {
   return run.fixRound[kind] < MAX_FIX_ROUNDS;
+}
+
+function parkAtCap(run: RunState, pauseReason: PauseReason, lastError: string): RunState {
+  return stamp(run, {
+    pauseReason,
+    halted: true,
+    pipelineLocked: false,
+    pendingHandoff: undefined,
+    lastError,
+    currentStatus: lastError,
+  });
 }
 
 export function filesFromFindings(findings: Finding[] | undefined): string[] {
@@ -816,12 +787,15 @@ export function applyHandoff(
       }
       if (cleared.stage === "design_critic" || cleared.currentRole === "design_critic") {
         const rejects = cleared.designRejectCount + 1;
+        const counted = stamp(cleared, { designRejectCount: rejects });
         if (rejects >= MAX_DESIGN_REJECTS) {
-          return startImplementation(
-            stamp(cleared, { designRejectCount: rejects, wantMockup: true }),
+          return parkAtCap(
+            stamp(counted, { wantMockup: true }),
+            "design_reject_max",
+            "Design critic rejected the mockup twice. /devteam continue starts implementation; /devteam skip does the same.",
           );
         }
-        return goToStage(stamp(cleared, { designRejectCount: rejects }), "designer");
+        return goToStage(counted, "designer");
       }
       return cleared;
 
@@ -873,27 +847,38 @@ export function applyHandoff(
 
     case "implementor_done": {
       if (cleared.stage === "implement" && (cleared.workItems?.length ?? 0) > 0) {
-        const layer = activeImplementLayer(cleared) ?? "general";
-        if (layerRemaining(cleared.workItems, layer).length) {
+        if (itemsRemaining(cleared.workItems).length) {
           return stamp(cleared, { pipelineLocked: false });
         }
-        if (retryableItems(itemsForLayer(cleared.workItems, layer)).length) {
+        if (retryableItems(cleared.workItems).length) {
           return stamp(cleared, { pipelineLocked: false });
         }
-        return enterLayerReview(cleared, layer);
+        return enterReview(cleared);
       }
       const more = nextService(cleared);
       if (more) return more;
       if (cleared.stage === "fix_review") return advanceQueue(cleared, "reviewer");
       if (cleared.stage === "fix_test") return advanceQueue(cleared, "tester");
       if (cleared.stage === "fix_lint") return advanceQueue(cleared, "linter");
-      const layer = activeImplementLayer(cleared) ?? "general";
-      return enterLayerReview(cleared, layer);
+      if (cleared.stage === "implement") {
+        const nextIndex = cleared.implementorIndex + 1;
+        if (nextIndex < cleared.implementorQueue.length) {
+          const currentRole = cleared.implementorQueue[nextIndex];
+          return stamp(cleared, {
+            implementorIndex: nextIndex,
+            currentRole,
+            pendingHandoff: undefined,
+            pipelineLocked: false,
+            ...withLayerServices(cleared, currentRole),
+          });
+        }
+      }
+      return enterReview(cleared);
     }
 
     case "qa_pass":
       if (cleared.stage === "reviewer" || cleared.stage === "fix_review") {
-        return afterLayerReviewPass(cleared);
+        return afterReviewPass(cleared);
       }
       if (cleared.stage === "tester" || cleared.stage === "fix_test") {
         return goToStage(cleared, "linter", { currentRole: "linter" });
@@ -909,7 +894,11 @@ export function applyHandoff(
     case "qa_fail": {
       if (cleared.stage === "reviewer" || cleared.stage === "fix_review") {
         if (!canFix(cleared, "review")) {
-          return afterLayerReviewPass(stamp(cleared, { pauseReason: undefined }));
+          return parkAtCap(
+            cleared,
+            "fix_review_max",
+            "Review did not pass after 3 fix rounds. /devteam continue proceeds to the tester; /devteam skip does the same.",
+          );
         }
         return startFix(
           cleared,
@@ -921,9 +910,11 @@ export function applyHandoff(
       }
       if (cleared.stage === "tester" || cleared.stage === "fix_test") {
         if (!canFix(cleared, "test")) {
-          return goToStage(stamp(cleared, { pauseReason: undefined }), "linter", {
-            currentRole: "linter",
-          });
+          return parkAtCap(
+            cleared,
+            "fix_test_max",
+            "Tests did not pass after 3 fix rounds. /devteam continue proceeds to the linter; /devteam skip does the same.",
+          );
         }
         return startFix(
           cleared,
@@ -934,7 +925,11 @@ export function applyHandoff(
         );
       }
       if (!canFix(cleared, "lint")) {
-        return proceedAfterLint(stamp(cleared, { pauseReason: undefined }));
+        return parkAtCap(
+          cleared,
+          "fix_lint_max",
+          "Lint did not pass after 3 fix rounds. /devteam continue proceeds; /devteam skip does the same.",
+        );
       }
       return startFix(
         cleared,
@@ -1029,8 +1024,23 @@ export function stackLayerForRole(
 
 function notesLookLikeApproval(notes: string | undefined): boolean {
   const text = notes?.trim() ?? "";
-  if (!text) return true;
+  if (!text) return false;
   return /^(approved|lgtm|looks good|no issues|no holes)\b/i.test(text) && text.length < 80;
+}
+
+function hasNotebookText(value: string | undefined): boolean {
+  return Boolean(value?.trim());
+}
+
+function layerNotesFor(
+  run: Pick<RunState, "databaseNotes" | "backendNotes" | "frontendNotes" | "generalNotes">,
+  role: RoleName | undefined,
+): string | undefined {
+  if (role === "database") return run.databaseNotes;
+  if (role === "backend") return run.backendNotes;
+  if (role === "frontend") return run.frontendNotes;
+  if (role === "general") return run.generalNotes;
+  return undefined;
 }
 
 /** When a child exits cleanly without calling handoff, recover the intended action from run state. */
@@ -1038,22 +1048,40 @@ export function inferHandoffAction(
   role: RoleName | undefined,
   run: RunState,
 ): HandoffAction | undefined {
-  if (role === "plan_critic")
+  if (role === "plan_critic") {
+    if (!hasNotebookText(run.planCritique?.notes) && !critiqueItems(run).length) return undefined;
     return notesLookLikeApproval(run.planCritique?.notes) ? "critic_approve" : "critic_revise";
-  if (role === "design_critic")
+  }
+  if (role === "design_critic") {
+    if (!hasNotebookText(run.designCritiqueNotes)) return undefined;
     return notesLookLikeApproval(run.designCritiqueNotes) ? "critic_approve" : "critic_revise";
+  }
   if (role === "planner_orchestrator") return run.scoutItems?.length ? "scout_planned" : undefined;
-  if (role === "scout") return "scout_done";
+  if (role === "scout") {
+    const items = run.scoutItems ?? [];
+    if (!items.length) return undefined;
+    if (itemsRemaining(items).length) return undefined;
+    if (items.some((item) => !item.findings?.trim())) return undefined;
+    return "scout_done";
+  }
   if (role === "orchestrator") return run.workItems?.length ? "work_planned" : undefined;
   if (role === "database" || role === "backend" || role === "frontend" || role === "general") {
-    return "implementor_done";
+    return hasNotebookText(layerNotesFor(run, role)) ? "implementor_done" : undefined;
   }
-  if (role === "reviewer") return hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "tester")
+  if (role === "reviewer") {
+    if (hasBlockFindings(run.reviewFindings)) return "qa_fail";
+    if (run.reviewFindings?.length) return "qa_pass";
+    return undefined;
+  }
+  if (role === "tester") {
+    if (!hasNotebookText(run.testResults) && !run.reviewFindings?.length) return undefined;
     return run.testFailed || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "linter")
+  }
+  if (role === "linter") {
+    if (!hasNotebookText(run.lintResults) && !run.reviewFindings?.length) return undefined;
     return run.lintErrors || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
-  if (role === "demo") return "qa_pass";
+  }
+  if (role === "demo") return hasNotebookText(run.demoNotes) ? "qa_pass" : undefined;
   if (role === "commit_message")
     return run.commitMessageDraft?.trim() ? "commit_drafted" : undefined;
   return undefined;

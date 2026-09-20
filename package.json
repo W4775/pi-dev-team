@@ -1,7 +1,7 @@
 {
   "name": "pi-dev-team",
   "version": "0.2.9",
-  "description": "Pi extension: /devteam runs a planner, optional designer, and specialized implementors with official stack skills.",
+  "description": "Pi extension: /devteam scouts, plans, and builds a vertical slice with specialized implementors, then reviews, tests, and optionally demos.",
   "keywords": [
     "pi-package"
   ],

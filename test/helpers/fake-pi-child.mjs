@@ -26,8 +26,19 @@ if (role === "planner_orchestrator") {
   run.pendingHandoff = { action: "scout_planned", summary: "one scout" };
   writeFileSync(statePath, `${JSON.stringify(run, null, 2)}\n`);
 } else if (role === "scout") {
+  const id = taskId || "s1";
+  run.scoutItems = (run.scoutItems ?? []).map((item) =>
+    item.id === id
+      ? {
+          ...item,
+          status: "done",
+          findings: `scout ${id} found src/index.ts`,
+        }
+      : item,
+  );
+  writeFileSync(statePath, `${JSON.stringify(run, null, 2)}\n`);
   process.stdout.write(
-    `${JSON.stringify({ type: "message", text: `scout ${taskId ?? "s1"} found src/index.ts` })}\n`,
+    `${JSON.stringify({ type: "message", text: `scout ${id} found src/index.ts` })}\n`,
   );
 } else if (role === "plan_critic") {
   run.planCritique = {

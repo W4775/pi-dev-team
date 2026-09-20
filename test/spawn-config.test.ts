@@ -333,6 +333,8 @@ test("child prompt names the role's tool-call budget", () => {
   assert.match(reviewer, /Stay under 200 tool calls/);
   assert.match(reviewer, /backend layer only/);
   assert.match(reviewer, /src\/server\/\*\*/);
+  const sliceReview = childUserPrompt("reviewer", "Review the diff");
+  assert.match(sliceReview, /whole implemented slice/);
   const scout = childUserPrompt("scout", "Map the UI", [], undefined, undefined, undefined, 40);
   assert.match(scout, /Stay under 40 tool calls/);
 });

@@ -38,7 +38,6 @@ import { isolatedRoleFromFlag, gateBash, gateWrite, isWriteTool } from "./permis
 import {
   acceptDemoChoice,
   acceptMockupChoice,
-  activeImplementLayer,
   activeRole,
   applyContinue,
   applyCritiqueDecisions,
@@ -49,7 +48,7 @@ import {
   attachRunForResume,
   autoResumeGate,
   continueHint,
-  enterLayerReview,
+  enterReview,
   goToStage,
   inferHandoffAction,
   needsIsolatedChild,
@@ -60,7 +59,6 @@ import {
   reviewScope,
   stackLayerForRole,
   startScouting,
-  startSequentialImplementation,
 } from "./pipeline.ts";
 import { loadRolePrompt } from "./roles.ts";
 import { resolveSkillsForLayer } from "./skills-resolve.ts";
@@ -98,15 +96,7 @@ import type {
   ChildAssignment,
 } from "./types.ts";
 import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS } from "./types.ts";
-import {
-  findItem,
-  itemsForLayer,
-  itemsRemaining,
-  layerRemaining,
-  nextWave,
-  retryableItems,
-  setItemStatus,
-} from "./work.ts";
+import { findItem, itemsRemaining, nextWave, retryableItems, setItemStatus } from "./work.ts";
 import { compileScoutNotes, findScout, nextScoutWave, setScoutStatus } from "./scout.ts";
 import {
   applyChrome,
@@ -635,7 +625,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           "Start the /devteam planner for this task.",
           "Grill until the spec is complete. Persist every decision with devteam_state.",
           "Scout notes are facts about this repo. Do not re-ask the user things they already answer. Name real files and types from those notes.",
-          "Infer layersNeeded for THIS change only (database, backend, frontend, general) — omit layers with no work. Write a short briefing into that layer's notes; leave the others blank so those implementors are skipped. Also store uiSurface.",
+          "Infer layersNeeded for THIS change only (database, backend, frontend, general) — omit layers with no work. Those names pick specialists for one slice, not a serial review factory. Write a short briefing into that layer's notes; leave the others blank so those implementors are skipped. Also store uiSurface.",
           "If the user already said whether they want HTML mockups, store wantMockup.",
           "If the user already said whether they want a live headed demo after QA, store wantDemo.",
           "When the spec is ready, call devteam_handoff with action plan_ready.",
@@ -939,26 +929,22 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       if (assignment.list === "scout") {
         const item = findScout(store.load()?.scoutItems, assignment.id);
         if (item?.status !== "done") {
+          if (!item?.findings?.trim()) {
+            return failItem(`${label} finished without scout findings or a handoff.`);
+          }
           mutateRun(statePath(), agentDirSafe(), (current) => ({
             ...current,
             scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
               status: "done",
               error: undefined,
-              findings: item?.findings ?? "inferred from clean exit",
+              findings: item.findings,
             }),
           }));
         }
       } else {
         const item = findItem(store.load()?.workItems, assignment.id);
         if (item?.status !== "done") {
-          mutateRun(statePath(), agentDirSafe(), (current) => ({
-            ...current,
-            workItems: setItemStatus(current.workItems, assignment.id, {
-              status: "done",
-              error: undefined,
-              summary: "inferred from clean exit",
-            }),
-          }));
+          return failItem(`${label} finished without implementor_done handoff.`);
         }
       }
       return { ok: true };
@@ -972,6 +958,10 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           pendingHandoff: { action: inferred, summary: "inferred from child exit" },
           pipelineLocked: false,
         });
+      } else {
+        const error = `${label} finished without a handoff.`;
+        persist({ ...after, pipelineLocked: false, lastError: error, currentRole: role });
+        return { ok: false, error };
       }
     }
     return { ok: true };
@@ -1003,9 +993,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         if (current.halted) return;
         if (current.stage !== "implement") return;
 
-        const layer = activeImplementLayer(current) ?? "general";
-        if (!layerRemaining(current.workItems, layer).length) {
-          const retry = retryableItems(itemsForLayer(current.workItems, layer));
+        if (!itemsRemaining(current.workItems).length) {
+          const retry = retryableItems(current.workItems);
           if (retry.length) {
             const ids = new Set(retry.map((item) => item.id));
             run = persist({
@@ -1017,23 +1006,18 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             });
             continue;
           }
-          persist(enterLayerReview(current, layer));
+          persist(enterReview(current));
           return;
         }
 
         const wave = nextWave(current.workItems, config?.parallel);
-        if (!wave.length || wave[0]?.layer !== layer) {
+        if (!wave.length) {
           persist(
-            enterLayerReview(
-              {
-                ...current,
-                lastError: wave.length
-                  ? undefined
-                  : (current.lastError ??
-                    "Work items were blocked; continuing to review this layer."),
-              },
-              layer,
-            ),
+            enterReview({
+              ...current,
+              lastError:
+                current.lastError ?? "Work items were blocked; continuing to review the slice.",
+            }),
           );
           return;
         }
@@ -1233,10 +1217,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           persist({ ...run, pipelineLocked: false });
           standDown(ctx);
           applyParentTools(undefined);
-          notify(
-            ctx,
-            `Stopped at ${run.stage}. /devteam continue resumes this step; /devteam skip skips it.`,
-          );
+          notify(ctx, continueHint(run));
           return;
         }
 
@@ -1300,6 +1281,16 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           );
           return;
         }
+        if (run.stage === "mockup_opt_in") {
+          persist(run);
+          applyParentTools(run);
+          refreshUi(ctx, run);
+          notify(
+            ctx,
+            "Want an HTML mockup before implementation? Answer yes or no, or /devteam skip to implement without one.",
+          );
+          return;
+        }
 
         if (needsIsolatedChild(run.stage)) {
           if (run.stage === "scout" && (run.scoutItems?.length ?? 0) > 0) {
@@ -1355,14 +1346,6 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           }
           if (!after.pendingHandoff) {
             if (after.lastError) return;
-            if (role === "planner_orchestrator") {
-              run = persist(goToStage(after, "planner"));
-              continue;
-            }
-            if (role === "orchestrator") {
-              run = persist(startSequentialImplementation(after));
-              continue;
-            }
             if (ctx.hasUI) {
               ctx.ui.notify(
                 `devteam: ${role} finished without a handoff. Check /devteam status.`,
@@ -1576,7 +1559,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
   });
 
   pi.registerCommand("devteam", {
-    description: "Run the /devteam coding workflow (planner, optional mockups, implementors)",
+    description:
+      "Run the /devteam workflow: scout, plan, build a vertical slice with specialists, review once, test, optional demo",
     getArgumentCompletions: (prefix: string) => {
       const items = ["continue", "list", "status", "stop", "clear", "mockup", "skip"].map(
         (value) => ({
@@ -1603,7 +1587,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             ctx,
             run && run.stage !== "idle"
               ? `devteam is at ${run.stage}. Try /devteam status.`
-              : "Usage: /devteam <task> | continue | status | mockup | skip | stop | clear",
+              : "Usage: /devteam <task> | continue | list | status | mockup | skip | stop | clear",
           );
           return;
         }

@@ -299,7 +299,7 @@ export type ProjectConfig = {
   models?: Partial<Record<IsolatedRole, string>>;
   /** Seconds between optional progress toasts. 0 (default) turns them off; live work goes to the working line. */
   progressEvery?: number;
-  /** How many implementor subagents may run at once within one layer. */
+  /** How many implementor subagents may run at once when file lists do not collide. */
   parallel?: number;
   /** Seconds with no child output before abort. 0 disables. Default 480 (8 min). */
   childIdle?: number;

@@ -136,30 +136,26 @@ export function nextWave(
   const limit = resolveParallel(maxParallel);
   const done = new Set(all.filter((item) => item.status === "done").map((item) => item.id));
 
+  const ready: WorkItem[] = [];
   for (const layer of IMPLEMENTOR_LAYERS) {
-    const inLayer = all.filter((item) => item.layer === layer);
-    if (!inLayer.length) continue;
-    const unfinished = inLayer.filter((item) => item.status === "pending");
-    if (!unfinished.length) {
-      if (inLayer.some((item) => item.status === "failed")) return [];
+    for (const item of all) {
+      if (item.layer !== layer || item.status !== "pending") continue;
+      if (item.dependsOn.some((dep) => !done.has(dep))) continue;
+      ready.push(item);
+    }
+  }
+
+  const wave: WorkItem[] = [];
+  for (const item of ready) {
+    if (!item.files.length) {
+      if (!wave.length) return [item];
       continue;
     }
-
-    const wave: WorkItem[] = [];
-    for (const item of unfinished) {
-      if (item.dependsOn.some((dep) => !done.has(dep))) continue;
-      if (wave.some((picked) => pathsCollide(picked.files, item.files))) continue;
-      wave.push(item);
-      if (wave.length >= limit) break;
-    }
-    if (!wave.length) {
-      // Still unfinished in this layer (deps or collisions) — do not skip ahead.
-      return [];
-    }
-    if (wave.some((item) => !item.files.length)) return [wave[0] as WorkItem];
-    return wave;
+    if (wave.some((picked) => pathsCollide(picked.files, item.files))) continue;
+    wave.push(item);
+    if (wave.length >= limit) break;
   }
-  return [];
+  return wave;
 }
 
 export function itemsForLayer(

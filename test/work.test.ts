@@ -40,7 +40,7 @@ test("normalizeWorkItems fills ids, layers, and drops unknown dependsOn", () => 
   assert.equal(items[2]?.id, "ui-3");
 });
 
-test("nextWave runs one layer at a time in pipeline order", () => {
+test("nextWave packs disjoint files across layers", () => {
   const wave = nextWave([
     item({ id: "ui", layer: "frontend", title: "page", files: ["src/app/**"] }),
     item({ id: "db", layer: "database", title: "schema", files: ["prisma/**"] }),
@@ -48,7 +48,7 @@ test("nextWave runs one layer at a time in pipeline order", () => {
   ]);
   assert.deepEqual(
     wave.map((entry) => entry.id),
-    ["db"],
+    ["db", "api", "ui"],
   );
 });
 
@@ -91,6 +91,28 @@ test("an item with no files runs alone", () => {
   );
 });
 
+test("nextWave waits on dependsOn across layers", () => {
+  const items = [
+    item({ id: "db", layer: "database", title: "schema", files: ["prisma/**"] }),
+    item({
+      id: "ui",
+      layer: "frontend",
+      title: "page",
+      files: ["src/app/**"],
+      dependsOn: ["db"],
+    }),
+  ];
+  assert.deepEqual(
+    nextWave(items).map((entry) => entry.id),
+    ["db"],
+  );
+  items[0]!.status = "done";
+  assert.deepEqual(
+    nextWave(items).map((entry) => entry.id),
+    ["ui"],
+  );
+});
+
 test("nextWave waits on dependsOn within a layer", () => {
   const items = [
     item({ id: "a", layer: "backend", title: "a", files: ["src/a/**"] }),
@@ -107,12 +129,15 @@ test("nextWave waits on dependsOn within a layer", () => {
   );
 });
 
-test("nextWave does not skip a layer that still has unfinished items", () => {
+test("nextWave runs ready items in other layers when one item is blocked on dependsOn", () => {
   const wave = nextWave([
     item({ id: "a", layer: "database", title: "a", files: ["db/**"], dependsOn: ["missing-done"] }),
     item({ id: "ui", layer: "frontend", title: "ui", files: ["src/app/**"] }),
   ]);
-  assert.deepEqual(wave, []);
+  assert.deepEqual(
+    wave.map((entry) => entry.id),
+    ["ui"],
+  );
 });
 
 test("nextWave returns nothing while any item is running", () => {

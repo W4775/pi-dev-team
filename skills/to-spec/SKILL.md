@@ -18,7 +18,7 @@ Write the spec into `devteam_state` (section: spec). Do not create GitHub/GitLab
 
 Check with the user that these seams match their expectations.
 
-3. Write the spec using the template below into `devteam_state`. Also record Layers Needed (`database`, `backend`, `frontend`, `general`) and Files To Change.
+3. Write the spec using the template below into `devteam_state`. Also record Layers Needed (`database`, `backend`, `frontend`, `general`) — those pick specialists for this slice, not a review waterfall — and Files To Change.
 
 <spec-template>
 

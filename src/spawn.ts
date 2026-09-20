@@ -392,13 +392,22 @@ export function childUserPrompt(
           .join("\n")
     : "";
   const review =
-    role === "reviewer" && extras?.reviewLayer
-      ? [
-          `This review is for the ${extras.reviewLayer} layer only. Later layers have not been implemented yet — do not block them for being missing.`,
-          extras.reviewFiles?.length
-            ? `Judge these files / globs:\n${extras.reviewFiles.map((file) => `- ${file}`).join("\n")}`
-            : `Focus on this layer's files. Earlier layers already passed review; only block those files if this layer's work broke them.`,
-        ].join("\n")
+    role === "reviewer"
+      ? extras?.reviewLayer
+        ? [
+            `This review is for the ${extras.reviewLayer} layer only.`,
+            extras.reviewFiles?.length
+              ? `Judge these files / globs:\n${extras.reviewFiles.map((file) => `- ${file}`).join("\n")}`
+              : `Focus on this layer's files.`,
+          ].join("\n")
+        : [
+            `This review covers the whole implemented slice. Block anything that fails standards or the spec.`,
+            extras?.reviewFiles?.length
+              ? `Judge these files / globs:\n${extras.reviewFiles.map((file) => `- ${file}`).join("\n")}`
+              : `Diff the working tree against gitBaseline and review the full change.`,
+          ]
+            .filter(Boolean)
+            .join("\n")
       : "";
   return [
     `You are the ${role.replaceAll("_", " ")} for this /devteam run.`,

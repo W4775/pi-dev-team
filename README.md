@@ -4,13 +4,13 @@
 
 **One command. Full team. `/devteam` plans, builds, tests, and demos.**
 
-Plans with scouts · Builds layer-by-layer · Tests + lints · Optional live demo
+Plans with scouts · Builds the slice · Tests + lints · Optional live demo
 
 [![Pi](https://img.shields.io/badge/Powered_by-Pi-7c3aed?style=flat-square)](https://pi.dev)
 [![Oh My Pi](https://img.shields.io/badge/Compatible-OMP-0a0a0a?style=flat-square)](https://github.com/coder/oh-my-pi)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-182_passing-brightgreen?style=flat-square)](#tests)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square)](#tests)
 
 [Quick Start](#-quick-start) · [How it Works](#-how-it-works) · [Commands](#-commands) · [Config](#-config) · [Stack Skills](#-stack-skills)
 
@@ -33,27 +33,27 @@ Then in any Pi/OMP session:
 /devteam Add a settings page for profile and notifications
 ```
 
-Answer the planner's picker → review the critic → watch layers build. Done.
+Answer the planner's picker → review the critic → watch specialists build the slice → one review, then tests. Done.
 
-> Previous jobs persist. ` /devteam list` to resume. Each session owns its own run.
+> Previous jobs persist. `/devteam list` to resume. Each session owns its own run.
 
 ---
 
 ## 🧠 How it Works
 
-**Scout → Plan → Build → Prove.**
+**Scout → Plan → Build the slice → Prove once.**
 
 | Step | What happens | Who |
 |------|--------------|-----|
-| **Scout** | 2–4 parallel read-only scouts map your repo | child |
-| **Plan** | Planner grills you (picker), writes spec; critic patches it | you + child |
-| **Design** | HTML mockup *only if* you opted `wantMockup` | you |
-| **Build** | Orchestrator splits spec → layers (`database → backend → frontend → general`) run in parallel waves (cap 6), reviewer gates each layer (3 rounds) | children |
-| **Prove** | Tester → Linter (3 fix rounds each) | children |
-| **Demo** | Headed Playwright drives your app *only for web UIs* with `wantDemo` | child |
-| **Ship** | Drafts conventional commit — *never commits* | child |
+| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo | children |
+| **Plan** | Planner grills you (picker), writes spec; critic may pause for Accept / Reject | you + child |
+| **Design** | HTML mockup only if the planner stored `wantMockup` (web + frontend) | you |
+| **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
+| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Each parks after 3 failed fix rounds until `/devteam continue` | children |
+| **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Headed Playwright, then you accept or request changes (max 2 demos) | you + child |
+| **Ship** | Drafts a conventional commit — *never commits* | child |
 
-All remotes are isolated processes. Planner/designer stay in your session; children run as `pi -a` / `omp --yolo @task`.
+Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo @task`). A child that exits without the notebook evidence for its role **stops the job** instead of inferring a pass.
 
 ---
 
@@ -61,15 +61,17 @@ All remotes are isolated processes. Planner/designer stay in your session; child
 
 | Command | Does |
 |---------|------|
-| `/devteam <task>` | Start new job |
-| `/devteam continue` | Resume current step |
+| `/devteam <task>` | Start a new job |
+| `/devteam continue` | Resume this step, or proceed past a parked cap |
 | `/devteam list` | Show saved jobs |
-| `/devteam continue 2` | Jump to job #2 at saved stage |
-| `/devteam skip` | Skip critic / review / QA / demo |
-| `/devteam stop` | Abort current step |
+| `/devteam continue 2` | Jump to job #2 at its saved stage |
+| `/devteam skip` | Skip this step. During implement, remaining items go to review |
+| `/devteam stop` | Abort the current child / step |
 | `/devteam status` | Show notebook paths |
-| `/devteam mockup` | Open HTML mockup |
-| `/devteam clear` | Wipe current job |
+| `/devteam mockup` | Open the HTML mockup |
+| `/devteam clear` | Wipe the current job |
+
+At demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
 
 ---
 
@@ -77,35 +79,57 @@ All remotes are isolated processes. Planner/designer stay in your session; child
 
 ```mermaid
 flowchart TD
-    A[/devteam task/] --> S[Scouts · parallel]
-    S --> P[Planner · picker]
-    P --> C[Plan Critic]
-    C -->|revise| P
-    C --> O[Orchestrator · workItems]
-    O --> B[Build · wave per layer]
-    B --> R[Reviewer · per layer]
-    R -->|qa_fail ×3| B
-    R --> T[Tester] --> L[Linter] --> D{wantDemo?}
-    D -->|yes| Demo[Demo · Playwright]
-    Demo -->|changes| P
-    D --> M[Commit draft]
+    A["/devteam task"] --> SO[Scout orchestrator]
+    SO --> SC[Scouts · parallel]
+    SC --> P[Planner · picker]
+    P --> C[Plan critic]
+    C -->|revise| PR[Plan review]
+    PR -->|accepted items| P
+    PR -->|keep spec| O
+    C -->|approve| MU{wantMockup?}
+    MU -->|yes · web UI| DS[Designer]
+    DS --> DC[Design critic]
+    DC -->|revise| DS
+    DC -->|approve| O
+    MU -->|no| O[Orchestrator]
+    O --> B[Specialists · waves]
+    B --> R[Reviewer · whole slice]
+    R -->|blocks| FX[Fix matching specialists]
+    FX --> R
+    R -->|pass or cap| T[Tester]
+    T -->|fail| TF[Fix]
+    TF --> T
+    T -->|pass or cap| L[Linter]
+    L -->|fail| LF[Fix]
+    LF --> L
+    L -->|pass or cap| Q{demo?}
+    Q -->|yes or ask| DM[Demo · Playwright]
+    DM --> DR[Demo review]
+    DR -->|changes · max 2| P
+    DR -->|accept| CM[Commit draft]
+    Q -->|no| CM
 ```
 
-Waves run together when file lists don't collide. No `workItems`? Falls back to needed layers only.
+Design, review, test, and lint **park after their cap** (2 design rejects, 3 fix rounds). `/devteam continue` proceeds (design → implement, review → tester, test → lint, lint → demo or commit). `/devteam skip` does the same at those caps.
 
 <details>
-<summary>Inside a build wave</summary>
+<summary>Inside the build: specialists, not a layer factory</summary>
 
 ```mermaid
 flowchart LR
-    Plan[workItems] --> DB[database]
-    DB --> BE[backend · 2 parallel]
-    BE --> FE[frontend · 3 parallel]
-    FE --> GEN[general]
-    DB -.-> R1[review] -.-> BE -.-> R2 -.-> FE -.-> R3 -.-> GEN -.-> R4
+    O[Orchestrator] --> W1["wave 1: database + backend"]
+    W1 -->|UI dependsOn API| W2["wave 2: frontend"]
+    W2 --> R[Reviewer · whole slice]
+    R --> T[Tester]
+    T --> L[Linter]
 ```
 
-Reviewer must pass (or hit 3-round cap) before next layer starts.
+Example: schema and API have disjoint files, so they share a wave; UI lists `dependsOn` the API item, so it waits. If all three are disjoint and have no `dependsOn`, they run in one wave (up to `parallel`, default 3, cap 6).
+
+- `layer` on an item only picks the specialist (`database` / `backend` / `frontend` / `general`) and its write globs.
+- Disjoint file lists run in the same wave, including across layers.
+- `dependsOn` is the only ordering (migration before route, route before UI).
+- No `workItems`? Needed specialists run in sequence, then the same single review.
 
 </details>
 
@@ -129,7 +153,8 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 - `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
 - `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
 - `models` — alias per role (OMP `@task` by default; Pi uses session model)
-- `parallel` / `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune concurrency & budgets
+- `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
+- `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 
 <details>
 <summary>State locations & resolution</summary>
@@ -196,12 +221,12 @@ OMP children use `PI_SUBPROCESS_CMD` / `omp --yolo` + `DEVTEAM_ROLE`.
 ## ✅ Tests
 
 ```bash
-npm test          # 182 tests, no Pi needed
+npm test          # unit + e2e harness, no Pi needed
 npm run lint      # oxlint
 npm run fmt:check # oxfmt (fix: npm run fmt)
 ```
 
-Covers: permissions, per-session state, teardown, layer routing, block vs note, stack detection, model tiers, transcript caps.
+Covers: permissions, per-session state, teardown, slice waves, review-once, fail-closed handoffs, block vs note, stack detection, model tiers, transcript caps.
 
 ---
 

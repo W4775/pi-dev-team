@@ -10,7 +10,7 @@ disable-model-invocation: true
 
 Break a plan, spec, or conversation into a set of **tickets**: tracer-bullet vertical slices, each declaring the tickets that **block** it.
 
-Write tickets into `devteam_state`. Blocking edges become Layers Needed plus per-layer work. Do not create tracker issues.
+Write tickets into `devteam_state`. Blocking edges become `dependsOn` between work items. Do not create tracker issues.
 
 ## Process
 
