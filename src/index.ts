@@ -735,6 +735,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       role,
       statePath: statePath(),
       skillDirs: dirs,
+      tools: toolsForRole(role),
       model: resolveChildModel(role, modelId(ctx), config?.models),
       thinking: thinkingOf(ctx),
       trusted: projectTrusted(ctx),

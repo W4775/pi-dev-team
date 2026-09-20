@@ -105,7 +105,7 @@ export type ChildCliOptions = {
   role: IsolatedRole;
   statePath: string;
   skillDirs: string[];
-  tools: string[];
+  tools?: string[];
   model?: string;
   thinking?: string;
   trusted?: boolean;
@@ -242,12 +242,13 @@ export function childProcessEnv(
 
 export function buildChildCliArgs(opts: ChildCliOptions): string[] {
   const omp = opts.omp ?? isOmpHost();
+  const tools = opts.tools ?? toolsForRole(opts.role);
   const args = ["--mode", "json", "-p", "--no-session", "--no-skills"];
   args.push("-e", opts.extensionPath);
   if (opts.trusted) args.push(omp ? "--yolo" : "-a");
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  if (opts.tools.length) args.push("--tools", mapToolsForHost(opts.tools, omp).join(","));
+  if (tools.length) args.push("--tools", mapToolsForHost(tools, omp).join(","));
   args.push("--append-system-prompt", opts.rolePromptFile);
   // Oh My Pi loads `-e` extensions, then reparses argv, then errors on
   // leftover unknown flags (`Error: unknown flags: …`, exit 2). Flags we

@@ -193,6 +193,23 @@ test("buildChildCliArgs reuses flags the host already rejected", () => {
   assert.ok(buildChildCliArgs(opts).includes("-a"));
 });
 
+test("buildChildCliArgs still emits --tools when the caller omits them", () => {
+  const args = buildChildCliArgs({
+    extensionPath: "/pkg/src/index.ts",
+    rolePromptFile: "/tmp/planner_orchestrator.prompt.md",
+    role: "planner_orchestrator",
+    statePath: "/tmp/run.json",
+    skillDirs: [],
+    trusted: true,
+    prompt: "plan scouts",
+    omp: false,
+  });
+  assert.ok(args.includes("--tools"));
+  const tools = args[args.indexOf("--tools") + 1] ?? "";
+  assert.match(tools, /devteam_state/);
+  assert.match(tools, /devteam_handoff/);
+});
+
 test("mapToolsForHost replaces Pi find/ls with Oh My Pi glob", () => {
   assert.deepEqual(mapToolsForHost(["read", "grep", "find", "ls", "bash"], true), [
     "read",
