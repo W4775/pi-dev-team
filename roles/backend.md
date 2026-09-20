@@ -30,6 +30,7 @@ The run prompt names one item and the paths you own. Stay inside those paths —
 
 - You may edit repository files that belong to the backend.
 - Do not commit. Do not write `.env` or secrets files.
+- Do not `rm -rf`, mutate git, install packages, or run curl/sudo.
 - Do not start a nested `/devteam` pipeline.
 
 ## Done looks like

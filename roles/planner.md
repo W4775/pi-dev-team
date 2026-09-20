@@ -16,7 +16,7 @@ Turn the user's task into a complete, buildable spec. Grill until ambiguity is g
 6. Infer **`layersNeeded` for this change only** — not every layer the repo has. A backend-only API change is `backend`; omit `frontend` and `database` if they do no work. Combinations are fine (`database, backend`). Those names pick specialized implementors for one slice; they are not a serial review factory. Then write a short briefing into that layer's notes (`databaseNotes` / `backendNotes` / `frontendNotes` / `generalNotes`). Leave unused layers blank so those implementors are skipped. Also store `uiSurface` (`web` / `native` / `terminal` / `none`).
 7. If the run prompt lists more than one service, name the service each part of the change lands in, and write every cross-service contract into the spec: endpoint, payload shape, status codes, error shape, and who retries.
 8. Name real files and types from the scout notes in the spec. Do not invent a second stack next to the one the scouts found.
-9. If the user says they do or do not want HTML mockups, store `wantMockup` as true or false.
+9. If the user says they do or do not want HTML mockups, store `wantMockup` as true or false. Leave it unset to ask after the spec is approved.
 10. When the spec is complete, write the full spec into the `spec` section, then call `devteam_handoff` with `action: "plan_ready"`.
 11. If this kick is a **critic follow-up**, apply only the accepted items. Do not re-grill. Do not re-read scout notes from scratch. Then `plan_ready` — there is no second critic pass.
 

@@ -19,10 +19,14 @@ import {
   parseLayers,
   proceedAfterLint,
   shouldOfferMockup,
+  neededImplementors,
+  shouldSkipImplementationOrchestrator,
+  shouldSkipScout,
   startImplementation,
   startScouting,
   startSequentialImplementation,
-  neededImplementors,
+  taskNamesAFile,
+  workItemsFromPlan,
 } from "../src/pipeline.ts";
 import { MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS } from "../src/types.ts";
 import type { RunState } from "../src/types.ts";
@@ -38,10 +42,10 @@ test("shouldOfferMockup only for frontend + web", () => {
   assert.equal(shouldOfferMockup(run({ layersNeeded: ["general"], uiSurface: "web" })), false);
 });
 
-test("nextAfterPlanCritic honors wantMockup and skip-designer when no web UI", () => {
+test("nextAfterPlanCritic asks for mockups the same way lint asks for demos", () => {
   assert.equal(
     nextAfterPlanCritic(run({ layersNeeded: ["frontend"], uiSurface: "web" })),
-    "orchestrate",
+    "mockup_opt_in",
   );
   assert.equal(
     nextAfterPlanCritic(run({ layersNeeded: ["frontend"], uiSurface: "web", wantMockup: true })),
@@ -49,13 +53,17 @@ test("nextAfterPlanCritic honors wantMockup and skip-designer when no web UI", (
   );
   assert.equal(
     nextAfterPlanCritic(run({ layersNeeded: ["frontend"], uiSurface: "web", wantMockup: false })),
-    "orchestrate",
+    "implement",
   );
   assert.equal(
     nextAfterPlanCritic(run({ layersNeeded: ["frontend"], uiSurface: "native" })),
+    "implement",
+  );
+  assert.equal(nextAfterPlanCritic(run({ layersNeeded: ["backend"] })), "implement");
+  assert.equal(
+    nextAfterPlanCritic(run({ layersNeeded: ["backend", "frontend"], uiSurface: "none" })),
     "orchestrate",
   );
-  assert.equal(nextAfterPlanCritic(run({ layersNeeded: ["backend"] })), "orchestrate");
 });
 
 test("critic approve starts implementation unless mockups were already requested", () => {
@@ -63,8 +71,7 @@ test("critic approve starts implementation unless mockups were already requested
     run({ stage: "plan_critic", layersNeeded: ["frontend"], uiSurface: "web" }),
     "critic_approve",
   );
-  assert.equal(next.stage, "orchestrate");
-  assert.equal(next.currentRole, "orchestrator");
+  assert.equal(next.stage, "mockup_opt_in");
 
   const designed = applyHandoff(
     run({ stage: "plan_critic", layersNeeded: ["frontend"], uiSurface: "web", wantMockup: true }),
@@ -78,7 +85,7 @@ test("skip at mockup opt-in declines designer and starts implementation", () => 
     run({ stage: "mockup_opt_in", layersNeeded: ["frontend"], uiSurface: "web" }),
   );
   assert.equal(next.wantMockup, false);
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
 });
 
 test("continue at mockup opt-in starts designer", () => {
@@ -91,7 +98,7 @@ test("chat yes/no at mockup opt-in", () => {
   const yes = acceptMockupChoice(run({ stage: "mockup_opt_in" }), true);
   const no = acceptMockupChoice(run({ stage: "mockup_opt_in" }), false);
   assert.equal(yes.stage, "designer");
-  assert.equal(no.stage, "orchestrate");
+  assert.equal(no.stage, "implement");
 });
 test("proceedAfterLint routes to demo, opt-in, or commit", () => {
   const yes: Partial<RunState> = { layersNeeded: ["frontend"], uiSurface: "web", wantDemo: true };
@@ -157,7 +164,7 @@ test("skip at the leftover build-it gate starts implementation", () => {
     layersNeeded: ["backend"],
   });
   const next = applySkip(paused);
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
 });
 
 test("continue at planner with a spec starts the plan critic", () => {
@@ -257,10 +264,10 @@ test("continue at build-it starts the orchestrator", () => {
   assert.equal(next.currentRole, "orchestrator");
 });
 
-test("leftover build-it pause auto-resumes into the orchestrator", () => {
+test("leftover build-it pause auto-resumes into implementation when one layer is enough", () => {
   const gated = autoResumeGate(run({ stage: "build_it_pause", layersNeeded: ["backend"] }));
-  assert.equal(gated.stage, "orchestrate");
-  assert.equal(gated.currentRole, "orchestrator");
+  assert.equal(gated.stage, "implement");
+  assert.equal(gated.currentRole, "backend");
 });
 
 test("autoResumeGate does not skip demo or mockup opt-in", () => {
@@ -336,20 +343,20 @@ test("accepting critic items sends the planner a filtered list; rejecting all st
   assert.match(patched.planCritique?.notes ?? "", /Rejected/);
 
   const approved = applyHandoff(patched, "plan_ready");
-  assert.equal(approved.stage, "orchestrate");
+  assert.equal(approved.stage, "implement");
 
   const none = applyCritiqueDecisions(reviewing, [
     { id: "c1", decision: "reject" },
     { id: "c2", decision: "reject" },
   ]);
-  assert.equal(none.stage, "orchestrate");
+  assert.equal(none.stage, "implement");
 });
 
 test("skip at plan critic or plan review keeps the spec and continues", () => {
   const critic = applySkip(
     run({ stage: "plan_critic", layersNeeded: ["backend"], spec: "Ship it" }),
   );
-  assert.equal(critic.stage, "orchestrate");
+  assert.equal(critic.stage, "implement");
 
   const review = applySkip(
     run({
@@ -363,14 +370,14 @@ test("skip at plan critic or plan review keeps the spec and continues", () => {
       },
     }),
   );
-  assert.equal(review.stage, "orchestrate");
+  assert.equal(review.stage, "implement");
 });
 
 test("skip at planner with a spec starts implementation instead of another critic loop", () => {
   const next = applySkip(
     run({ stage: "planner", spec: "Ship settings page", layersNeeded: ["backend"] }),
   );
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
 });
 
 test("stop halts the current step; continue resumes it; auto-resume does not", () => {
@@ -395,7 +402,7 @@ test("design critic approve starts implementation", () => {
     run({ stage: "design_critic", layersNeeded: ["frontend"] }),
     "critic_approve",
   );
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
 });
 
 test("design critic cap parks instead of looping the designer", () => {
@@ -412,15 +419,15 @@ test("design critic cap parks instead of looping the designer", () => {
   assert.equal(autoResumeGate(capped).stage, "design_critic");
   const proceeded = applyContinue(capped);
   assert.equal(proceeded.halted, false);
-  assert.equal(proceeded.stage, "orchestrate");
-  assert.equal(applySkip(capped).stage, "orchestrate");
+  assert.equal(proceeded.stage, "implement");
+  assert.equal(applySkip(capped).stage, "implement");
 });
 
 test("empty layers needed routes to general only", () => {
   assert.deepEqual(parseLayers(undefined), ["general"]);
   assert.deepEqual(parseLayers([]), ["general"]);
   const next = startImplementation(run({ layersNeeded: [] }));
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
   assert.deepEqual(next.implementorQueue, ["general"]);
 });
 
@@ -514,7 +521,7 @@ test("plan rewrite skip restores original spec and keeps executing", () => {
   );
   assert.equal(next.spec, "old spec");
   assert.deepEqual(next.layersNeeded, ["backend"]);
-  assert.equal(next.stage, "orchestrate");
+  assert.equal(next.stage, "implement");
 });
 
 test("sequential implementors finish the slice then review once", () => {
@@ -937,11 +944,22 @@ test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exit
   );
   assert.equal(
     inferHandoffAction("tester", run({ testFailed: true, reviewFindings: [] })),
-    undefined,
+    "qa_fail",
   );
   assert.equal(
     inferHandoffAction("tester", run({ testResults: "1 failed", testFailed: true })),
     "qa_fail",
+  );
+  assert.equal(
+    inferHandoffAction(
+      "tester",
+      run({ testResults: "Error: optional config missing", testFailed: undefined }),
+    ),
+    undefined,
+  );
+  assert.equal(
+    inferHandoffAction("tester", run({ testResults: "ok", testFailed: false })),
+    "qa_pass",
   );
   assert.equal(
     inferHandoffAction(
@@ -1075,4 +1093,92 @@ test("inferHandoffAction recovers scout orchestrator and scout exits", () => {
     ),
     "scout_done",
   );
+});
+
+test("scout is skipped when the task already names a file", () => {
+  assert.equal(taskNamesAFile("Add a settings page"), false);
+  assert.equal(taskNamesAFile("Fix src/pipeline.ts lint"), true);
+  assert.equal(shouldSkipScout(run({ task: "Add a settings page" })), false);
+  const named = startScouting(run({ task: "Fix src/index.ts" }));
+  assert.equal(named.stage, "planner");
+  assert.equal(named.currentRole, "planner");
+  const polyglot = startScouting(
+    run({
+      task: "Fix src/index.ts",
+      stack: {
+        frontend: undefined,
+        backend: "go",
+        backends: ["go"],
+        database: [],
+        tester: [],
+        extra: [],
+        uiSurface: "none",
+        matchedIds: [],
+        services: [
+          {
+            name: "api",
+            root: "services/api",
+            layer: "backend",
+            languages: ["go"],
+            paths: ["services/api/**"],
+            skills: [],
+            test: [],
+            lint: [],
+            serve: [],
+            source: "detected",
+          },
+          {
+            name: "web",
+            root: "services/web",
+            layer: "frontend",
+            languages: ["ts"],
+            paths: ["services/web/**"],
+            skills: [],
+            test: [],
+            lint: [],
+            serve: [],
+            source: "detected",
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(polyglot.stage, "scout_orchestrate");
+});
+
+test("implementation orchestrator is skipped when one layer or every layer has files", () => {
+  assert.equal(shouldSkipImplementationOrchestrator(run({ layersNeeded: ["backend"] })), true);
+  assert.equal(
+    shouldSkipImplementationOrchestrator(run({ layersNeeded: ["backend", "frontend"] })),
+    false,
+  );
+  assert.equal(
+    shouldSkipImplementationOrchestrator(
+      run({
+        layersNeeded: ["backend", "frontend"],
+        filesToChange: { backend: ["src/api.ts"], frontend: ["src/app.tsx"] },
+      }),
+    ),
+    true,
+  );
+  const one = startImplementation(run({ layersNeeded: ["backend"] }));
+  assert.equal(one.stage, "implement");
+  assert.equal(one.workItems?.[0]?.id, "backend-slice");
+  const known = startImplementation(
+    run({
+      layersNeeded: ["backend", "frontend"],
+      filesToChange: { backend: ["src/api.ts"], frontend: ["src/app.tsx"] },
+      backendNotes: "Add the route",
+    }),
+  );
+  assert.equal(known.stage, "implement");
+  assert.equal(known.workItems?.length, 2);
+  assert.deepEqual(
+    workItemsFromPlan(
+      run({ layersNeeded: ["backend"], filesToChange: { backend: ["src/api.ts"] } }),
+    ).map((item) => item.files),
+    [["src/api.ts"]],
+  );
+  const many = startImplementation(run({ layersNeeded: ["database", "backend", "frontend"] }));
+  assert.equal(many.stage, "orchestrate");
 });

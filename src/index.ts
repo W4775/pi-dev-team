@@ -24,6 +24,7 @@ import { listJobs, loadJob, newJobId, renderJobList, resolveJobRef } from "./job
 import { formatChildFailure, spawnPiChild } from "./child-process.ts";
 import {
   activityLine,
+  bashFailedFromChildOutput,
   formatElapsed,
   isRepeatedToolLoop,
   resolveChildIdleMs,
@@ -67,6 +68,7 @@ import {
   buildChildCliArgs,
   childProcessEnv,
   childUserPrompt,
+  isOmpHost,
   parseUnknownFlags,
   rememberRejectedFlags,
   resolveChildModel,
@@ -626,7 +628,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
           "Grill until the spec is complete. Persist every decision with devteam_state.",
           "Scout notes are facts about this repo. Do not re-ask the user things they already answer. Name real files and types from those notes.",
           "Infer layersNeeded for THIS change only (database, backend, frontend, general) — omit layers with no work. Those names pick specialists for one slice, not a serial review factory. Write a short briefing into that layer's notes; leave the others blank so those implementors are skipped. Also store uiSurface.",
-          "If the user already said whether they want HTML mockups, store wantMockup.",
+          "If the user already said whether they want HTML mockups, store wantMockup. Leave it unset to ask after the spec is approved.",
           "If the user already said whether they want a live headed demo after QA, store wantDemo.",
           "When the spec is ready, call devteam_handoff with action plan_ready.",
           `Task:\n${run.task}`,
@@ -726,7 +728,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       statePath: statePath(),
       skillDirs: dirs,
       tools: toolsForRole(role),
-      model: resolveChildModel(role, modelId(ctx), config?.models),
+      model: resolveChildModel(role, modelId(ctx), config?.models, isOmpHost(), locked.stage),
       thinking: thinkingOf(ctx),
       trusted: projectTrusted(ctx),
       serviceName: service?.name,
@@ -918,6 +920,17 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     });
 
     const after = store.load() ?? next;
+    if (!assignment && (role === "tester" || role === "linter") && !after.pendingHandoff) {
+      const fromBash = bashFailedFromChildOutput(result.stdout);
+      if (fromBash !== undefined) {
+        if (role === "tester" && after.testFailed === undefined) {
+          persist({ ...after, testFailed: fromBash, pipelineLocked: false });
+        } else if (role === "linter" && after.lintErrors === undefined) {
+          persist({ ...after, lintErrors: fromBash, pipelineLocked: false });
+        }
+      }
+    }
+    const resolved = store.load() ?? after;
     if (assignment) {
       const doneAction = assignment.list === "scout" ? "scout_done" : "implementor_done";
       if (after.pendingHandoff?.action === doneAction) {
@@ -950,17 +963,17 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       return { ok: true };
     }
 
-    if (!after.pendingHandoff) {
-      const inferred = inferHandoffAction(role, after);
+    if (!resolved.pendingHandoff) {
+      const inferred = inferHandoffAction(role, resolved);
       if (inferred) {
         persist({
-          ...after,
+          ...resolved,
           pendingHandoff: { action: inferred, summary: "inferred from child exit" },
           pipelineLocked: false,
         });
       } else {
         const error = `${label} finished without a handoff.`;
-        persist({ ...after, pipelineLocked: false, lastError: error, currentRole: role });
+        persist({ ...resolved, pipelineLocked: false, lastError: error, currentRole: role });
         return { ok: false, error };
       }
     }
@@ -1388,18 +1401,22 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     jobId = newJobId(taken);
     const git = captureGit(ctx.cwd);
     const detection = detectStack(getCatalog(), { cwd: ctx.cwd, config: config ?? undefined });
-    let run = startScouting(emptyRun(sessionId, task, jobId));
+    let run = emptyRun(sessionId, task, jobId);
     run.stack = detection;
     run.uiSurface = detection.uiSurface;
     run.gitBaseline = git.baseline;
     run.dirtyAtStart = git.dirty;
     run.cwd = ctx.cwd;
+    run = startScouting(run);
     persist(run);
+    const skippedScout = run.stage === "planner";
     logProgress(ctx, {
       kind: "stage",
       stage: run.stage,
-      role: "planner_orchestrator",
-      text: "Scouting the repo. The planner will ask questions after that.",
+      role: skippedScout ? "planner" : "planner_orchestrator",
+      text: skippedScout
+        ? "Planner. Scouts skipped — the task already names the files."
+        : "Scouting the repo. The planner will ask questions after that.",
     });
     if (git.dirty && ctx.hasUI) {
       ctx.ui.notify(

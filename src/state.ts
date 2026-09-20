@@ -46,7 +46,9 @@ export const STATE_SECTIONS = [
   "generalNotes",
   "openQuestions",
   "reviewFindings",
+  "testFindings",
   "testResults",
+  "lintFindings",
   "lintResults",
   "commitMessageDraft",
   "currentStatus",
@@ -276,6 +278,8 @@ export function getSection(run: RunState, section: StateSection): unknown {
     case "openQuestions":
       return run.openQuestions;
     case "reviewFindings":
+    case "testFindings":
+    case "lintFindings":
       return run.reviewFindings;
     case "testResults":
       return run.testResults;
@@ -391,16 +395,26 @@ export function updateSection(run: RunState, section: StateSection, value: unkno
     case "reviewFindings":
       next.reviewFindings = parseFindings(value);
       break;
+    case "testFindings": {
+      next.reviewFindings = parseFindings(value);
+      if (hasBlockFindings(next.reviewFindings)) next.testFailed = true;
+      break;
+    }
+    case "lintFindings": {
+      next.reviewFindings = parseFindings(value);
+      if (hasBlockFindings(next.reviewFindings)) next.lintErrors = true;
+      break;
+    }
     case "testResults": {
-      const text = String(value ?? "");
-      next.testResults = text;
-      next.testFailed = /fail|error|not ok|FAILED/i.test(text) && !/0 fail/i.test(text);
+      const outcome = parseCommandOutcome(value);
+      next.testResults = outcome.log;
+      next.testFailed = outcome.failed;
       break;
     }
     case "lintResults": {
-      const text = String(value ?? "");
-      next.lintResults = text;
-      next.lintErrors = /\berror\b/i.test(text) && !/0 error/i.test(text);
+      const outcome = parseCommandOutcome(value);
+      next.lintResults = outcome.log;
+      next.lintErrors = outcome.failed;
       break;
     }
     case "commitMessageDraft":
@@ -416,6 +430,69 @@ export function updateSection(run: RunState, section: StateSection, value: unkno
       break;
   }
   return next;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function numericExit(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) return Number(value.trim());
+  return undefined;
+}
+
+export type CommandOutcome = { log: string; failed?: boolean };
+
+/**
+ * Test/lint notebook values are an oracle only when they carry an exit code,
+ * a boolean `failed`/`ok`, or `[block]` findings. Prose dumps are not scanned
+ * for the words "fail" / "error".
+ */
+export function parseCommandOutcome(value: unknown): CommandOutcome {
+  let raw: unknown = value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        raw = JSON.parse(trimmed);
+      } catch {
+        raw = value;
+      }
+    }
+  }
+
+  const obj = asRecord(raw);
+  if (obj) {
+    const log = String(obj.log ?? obj.output ?? obj.results ?? obj.text ?? obj.stdout ?? "");
+    const display = log.trim() ? log : typeof value === "string" ? value : JSON.stringify(obj);
+    if (typeof obj.failed === "boolean") return { log: display, failed: obj.failed };
+    if (typeof obj.ok === "boolean") return { log: display, failed: !obj.ok };
+    if (typeof obj.errors === "boolean") return { log: display, failed: obj.errors };
+    if (typeof obj.passed === "boolean") return { log: display, failed: !obj.passed };
+    const exit = numericExit(obj.exitCode ?? obj.exit_code ?? obj.exit);
+    if (exit !== undefined) return { log: display, failed: exit !== 0 };
+    if (obj.findings != null && hasBlockFindings(parseFindings(obj.findings))) {
+      return { log: display, failed: true };
+    }
+    return { log: display };
+  }
+
+  const text = String(value ?? "");
+  if (/\[block\]/i.test(text)) return { log: text, failed: true };
+  if (/^(?:failed|errors):\s*true\b/im.test(text)) return { log: text, failed: true };
+  if (/^(?:failed|errors):\s*false\b/im.test(text)) return { log: text, failed: false };
+  if (/^(?:ok|passed):\s*true\b/im.test(text)) return { log: text, failed: false };
+  if (/^(?:ok|passed):\s*false\b/im.test(text)) return { log: text, failed: true };
+  if (/^exit(?:[_\s-]?code)?:\s*0\b/im.test(text)) return { log: text, failed: false };
+  if (/^exit(?:[_\s-]?code)?:\s*[1-9]\d*\b/im.test(text)) return { log: text, failed: true };
+  return { log: text };
 }
 
 export function parseFindings(value: unknown): Finding[] {

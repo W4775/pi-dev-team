@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import type { ChildAssignment, IsolatedRole, ServiceInfo } from "./types.ts";
+import type { ChildAssignment, IsolatedRole, ServiceInfo, Stage } from "./types.ts";
 
 export type HostInvocation = {
   command: string;
@@ -87,17 +87,31 @@ export function toolsForRole(role: IsolatedRole): string[] {
   return [...READ_TOOL_NAMES, ...custom];
 }
 export const DEFAULT_CHILD_MODEL = "@task";
+export const FIX_CHILD_MODEL = "@slow";
+
+const FIX_STAGES = new Set<Stage>(["fix_review", "fix_test", "fix_lint"]);
+
+function isImplementorChild(role: IsolatedRole): boolean {
+  return role === "database" || role === "backend" || role === "frontend" || role === "general";
+}
+
+/** After QA fails, spend the slow tier on the implementor who has to fix it. */
+export function nextFixModel(role: IsolatedRole, stage: Stage | undefined): string | undefined {
+  if (!stage || !FIX_STAGES.has(stage) || !isImplementorChild(role)) return undefined;
+  return FIX_CHILD_MODEL;
+}
 
 export function resolveChildModel(
   role: IsolatedRole,
   parentModel: string | undefined,
   configured?: Partial<Record<IsolatedRole, string>>,
   ompHost = isOmpHost(),
+  stage?: Stage,
 ): string | undefined {
   const override = configured?.[role]?.trim();
   if (override) return override;
   if (!ompHost) return parentModel;
-  return DEFAULT_CHILD_MODEL;
+  return nextFixModel(role, stage) ?? DEFAULT_CHILD_MODEL;
 }
 export type ChildCliOptions = {
   extensionPath: string;
@@ -339,8 +353,8 @@ export function stateSectionsForRole(role: IsolatedRole): string[] {
   if (role === "database" || role === "backend" || role === "frontend" || role === "general")
     return ["task", "spec", "layersNeeded", "stack", `${role}Notes`];
   if (role === "reviewer") return ["task", "spec", "stack", "reviewFindings"];
-  if (role === "tester") return ["task", "spec", "stack", "testResults"];
-  if (role === "linter") return ["task", "spec", "lintResults"];
+  if (role === "tester") return ["task", "spec", "stack", "testResults", "reviewFindings"];
+  if (role === "linter") return ["task", "spec", "lintResults", "reviewFindings"];
   if (role === "demo") return ["task", "spec", "stack", "frontendNotes"];
   if (role === "design_critic") return ["task", "spec", "designPlan", "mockupPath"];
   if (role === "commit_message") return ["task", "spec", "testResults", "lintResults"];

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   activityLine,
+  bashFailedFromChildOutput,
   createProgressParser,
   describeToolCall,
   isMutatingToolLabel,
@@ -322,4 +323,26 @@ test("toolcall_start then execution_start is one call and keeps the path", () =>
   assert.equal(tools[0]?.label, "read");
   const labels = updates.map((update) => update.label);
   assert.equal(labels.includes("read src/app/hub.tsx"), true);
+});
+
+test("bashFailedFromChildOutput reads ended bash events, not log text", () => {
+  assert.equal(bashFailedFromChildOutput(""), undefined);
+  assert.equal(
+    bashFailedFromChildOutput(
+      `${JSON.stringify({ type: "tool_execution_end", toolName: "bash", exitCode: 0 })}\n`,
+    ),
+    false,
+  );
+  assert.equal(
+    bashFailedFromChildOutput(
+      `${JSON.stringify({ type: "tool_execution_end", toolName: "bash", exitCode: 1 })}\n`,
+    ),
+    true,
+  );
+  assert.equal(
+    bashFailedFromChildOutput(
+      `${JSON.stringify({ type: "text", text: "Error: failed" })}\n${JSON.stringify({ type: "tool_execution_end", toolName: "read", isError: true })}\n`,
+    ),
+    undefined,
+  );
 });

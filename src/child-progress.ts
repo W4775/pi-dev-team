@@ -385,6 +385,70 @@ export function isRepeatedToolLoop(labels: string[], limit: number): boolean {
   return streak.every((label) => label === streak[0]);
 }
 
+/**
+ * True when any ended bash/shell tool in the JSON event stream failed.
+ * Undefined when the stream has no bash end events (no oracle).
+ */
+export function bashFailedFromChildOutput(stdout: string): boolean | undefined {
+  let sawEnd = false;
+  let failed = false;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const type = typeof event.type === "string" ? event.type : "";
+    const nested =
+      event.toolCall && typeof event.toolCall === "object"
+        ? (event.toolCall as Record<string, unknown>)
+        : event.result && typeof event.result === "object"
+          ? (event.result as Record<string, unknown>)
+          : event.data && typeof event.data === "object"
+            ? (event.data as Record<string, unknown>)
+            : undefined;
+    const name = (
+      firstString(event, ["toolName", "tool", "name"]) ??
+      firstString(nested, ["toolName", "name", "tool"]) ??
+      ""
+    ).toLowerCase();
+    if (name !== "bash" && name !== "shell") continue;
+    const looksLikeEnd =
+      /(?:^|_)(end|result|finished|complete)(?:$|_)/i.test(type) ||
+      event.isError !== undefined ||
+      event.exitCode !== undefined ||
+      event.exit_code !== undefined ||
+      nested?.isError !== undefined ||
+      nested?.exitCode !== undefined;
+    if (!looksLikeEnd) continue;
+    sawEnd = true;
+    const exitRaw =
+      event.exitCode ??
+      event.exit_code ??
+      event.exit ??
+      nested?.exitCode ??
+      nested?.exit_code ??
+      nested?.exit;
+    const exit =
+      typeof exitRaw === "number"
+        ? exitRaw
+        : typeof exitRaw === "string" && /^-?\d+$/.test(exitRaw.trim())
+          ? Number(exitRaw.trim())
+          : undefined;
+    if (typeof exit === "number") {
+      if (exit !== 0) failed = true;
+      continue;
+    }
+    if (event.isError === true || nested?.isError === true || event.success === false)
+      failed = true;
+  }
+  if (!sawEnd) return undefined;
+  return failed;
+}
+
 export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));
   const minutes = Math.floor(total / 60);

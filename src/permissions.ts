@@ -227,10 +227,53 @@ export function gateBash(
   }
 
   if (isImplementorRole(role)) {
-    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
-    return { block: false };
+    return gateImplementorBash(cmd);
   }
 
+  return { block: false };
+}
+
+const IMPLEMENTOR_GIT_READ =
+  /^(?:cd\s+.+\s+&&\s+)?git\s+(status|diff|log|show|rev-parse|ls-files|blame|describe)\b/;
+
+function stripEnvPrefix(command: string): string {
+  return command.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, "").trim();
+}
+
+function commandSegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||;|\n/)
+    .map((part) => stripEnvPrefix(part.trim()))
+    .filter(Boolean);
+}
+
+export function gateImplementorBash(command: string): WriteGate {
+  const cmd = command.trim();
+  if (/\bgit\s+commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
+  if (/\b(sudo|doas)\b/.test(cmd)) {
+    return { block: true, reason: "Privileged commands are blocked." };
+  }
+  if (/\b(curl|wget)\b/.test(cmd)) {
+    return { block: true, reason: "Network fetch (curl/wget) is blocked for implementors." };
+  }
+  if (/\brm\s+(?:-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b/.test(cmd)) {
+    return { block: true, reason: "Recursive delete is blocked." };
+  }
+
+  for (const part of commandSegments(cmd)) {
+    if (/^git\b/.test(part) && !IMPLEMENTOR_GIT_READ.test(part)) {
+      return { block: true, reason: "Implementors may not mutate git state." };
+    }
+    if (
+      /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|remove|uninstall|ci)\b/.test(part) ||
+      /\b(?:pip|pip3)\s+install\b/.test(part) ||
+      /\bpoetry\s+add\b/.test(part) ||
+      /\bcargo\s+(?:add|install)\b/.test(part) ||
+      /\bgo\s+get\b/.test(part)
+    ) {
+      return { block: true, reason: "Package installs are blocked." };
+    }
+  }
   return { block: false };
 }
 

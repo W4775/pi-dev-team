@@ -12,6 +12,7 @@ import {
   mutateRun,
   normalizeStack,
   parseFindings,
+  parseCommandOutcome,
   readCurrentJobId,
   renderRunMarkdown,
   runPaths,
@@ -191,6 +192,25 @@ test("devteam_state get accepts a section list and rejects unknown names", () =>
   assert.deepEqual(JSON.parse(got.text), { task: "scoped task", spec: "A spec" });
   const bad = applyStateTool(store, { action: "get", sections: ["spec", "nope"] });
   assert.equal(bad.isError, true);
+});
+
+test("parseCommandOutcome uses exit codes and blocks, not log regex", () => {
+  assert.deepEqual(parseCommandOutcome({ exitCode: 0, log: "1 failed, 0 error" }), {
+    log: "1 failed, 0 error",
+    failed: false,
+  });
+  assert.deepEqual(parseCommandOutcome({ exitCode: 1, log: "ok" }), { log: "ok", failed: true });
+  assert.equal(parseCommandOutcome("Error: optional config missing").failed, undefined);
+  assert.equal(parseCommandOutcome("failed: true\n1 error").failed, true);
+  assert.equal(parseCommandOutcome("- [block] tests did not run").failed, true);
+  let run = emptyRun("s", "task");
+  run = updateSection(run, "testResults", JSON.stringify({ exitCode: 0, log: "Error: skipped" }));
+  assert.equal(run.testFailed, false);
+  run = updateSection(run, "lintResults", "error TS2304");
+  assert.equal(run.lintErrors, undefined);
+  run = updateSection(run, "testFindings", "- [block] src/a.ts: missing coverage");
+  assert.equal(run.testFailed, true);
+  assert.equal(run.reviewFindings?.[0]?.severity, "block");
 });
 
 test("mockup path cannot escape the mockup directory", () => {

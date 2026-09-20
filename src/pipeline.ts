@@ -1,11 +1,12 @@
 import { hasBlockFindings, layerFromFile } from "./state.ts";
-import { serviceQueueForLayer, servicesForFiles } from "./services.ts";
+import { isMultiService, serviceQueueForLayer, servicesForFiles } from "./services.ts";
 import {
   applyServiceDefaults,
   failedItems,
   itemsForLayer,
   itemsRemaining,
   layersFromItems,
+  normalizeWorkItems,
   retryableItems,
 } from "./work.ts";
 import { compileScoutNotes, retryableScouts } from "./scout.ts";
@@ -21,6 +22,7 @@ import type {
   RunState,
   Stage,
   UiSurface,
+  WorkItem,
 } from "./types.ts";
 import {
   IMPLEMENTOR_LAYERS,
@@ -157,10 +159,13 @@ export function nextAfterPlanCritic(run: RunState): Stage {
   return proceedAfterPlan(run).stage;
 }
 
-/** After the spec is approved, start the designer only if the user already asked for mockups. */
+/** After the spec is approved, ask for a mockup the same way lint asks for a demo. */
 export function proceedAfterPlan(run: RunState): RunState {
   if (run.wantMockup === true && shouldOfferMockup(run)) {
     return goToStage(stamp(run, { pauseReason: undefined }), "designer");
+  }
+  if (run.wantMockup === undefined && shouldOfferMockup(run)) {
+    return goToStage(stamp(run, { pauseReason: undefined }), "mockup_opt_in");
   }
   return startImplementation(
     stamp(run, { wantMockup: run.wantMockup === true, pauseReason: undefined }),
@@ -397,15 +402,93 @@ export function afterReviewPass(run: RunState): RunState {
   });
 }
 
+const FILE_EXT =
+  /\b(?:[\w.-]+\/)*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|go|py|rs|cs|vue|svelte|css|scss|html|sql|prisma|json|toml|yml|yaml|md|graphql|proto)\b/i;
+const SRC_PATH =
+  /(?:^|[\s`'"(])(?:\.\/)?(?:src|app|lib|pkg|internal|cmd|services|backend|frontend|server|client|packages|apps)\/[\w./-]+/;
+
+/** True when the task already points at a concrete file or src-tree path. */
+export function taskNamesAFile(task: string | undefined): boolean {
+  const text = task?.trim() ?? "";
+  if (!text) return false;
+  if (FILE_EXT.test(text)) return true;
+  return SRC_PATH.test(text);
+}
+
+export function shouldSkipScout(run: Pick<RunState, "task" | "stack">): boolean {
+  if (isMultiService(run.stack?.services)) return false;
+  return taskNamesAFile(run.task);
+}
+
 export function startScouting(run: RunState): RunState {
+  if (shouldSkipScout(run)) {
+    return goToStage(run, "planner", {
+      currentRole: "planner",
+      pauseReason: undefined,
+    });
+  }
   return goToStage(run, "scout_orchestrate", {
     currentRole: "planner_orchestrator",
     pauseReason: undefined,
   });
 }
 
+export function shouldSkipImplementationOrchestrator(
+  run: Pick<
+    RunState,
+    | "workItems"
+    | "layersNeeded"
+    | "filesToChange"
+    | "databaseNotes"
+    | "backendNotes"
+    | "frontendNotes"
+    | "generalNotes"
+  >,
+): boolean {
+  if (run.workItems?.length) return true;
+  const layers = neededImplementors({ ...run, workItems: undefined });
+  if (layers.length <= 1) return true;
+  return layers.every((layer) => (run.filesToChange?.[layer] ?? []).length > 0);
+}
+
+export function workItemsFromPlan(run: RunState): WorkItem[] {
+  const layers = neededImplementors({ ...run, workItems: undefined });
+  return normalizeWorkItems(
+    layers.map((layer) => {
+      const details = layerNote(run, layer)?.trim();
+      const heading = details
+        ?.split("\n")
+        .find((line) => line.trim())
+        ?.trim();
+      return {
+        id: `${layer}-slice`,
+        layer,
+        title: heading?.slice(0, 80) || `${layer} work`,
+        details: details || undefined,
+        files: [...(run.filesToChange?.[layer] ?? [])],
+        dependsOn: [],
+        status: "pending",
+      };
+    }),
+  );
+}
+
 export function startImplementation(run: RunState): RunState {
   const queue = neededImplementors(run);
+  if (shouldSkipImplementationOrchestrator(run)) {
+    const prepared = applyServiceDefaults(
+      run.workItems?.length ? run.workItems : workItemsFromPlan(run),
+      run.stack?.services,
+    );
+    if (!prepared.length) return startSequentialImplementation(run);
+    const nextQueue = neededImplementors({ ...run, workItems: prepared });
+    return goToStage(stamp(run, { workItems: prepared }), "implement", {
+      implementorQueue: nextQueue.length ? nextQueue : queue,
+      implementorIndex: 0,
+      currentRole: prepared[0]?.layer ?? queue[0],
+      pauseReason: undefined,
+    });
+  }
   return goToStage(run, "orchestrate", {
     implementorQueue: queue,
     implementorIndex: 0,
@@ -1074,12 +1157,16 @@ export function inferHandoffAction(
     return undefined;
   }
   if (role === "tester") {
-    if (!hasNotebookText(run.testResults) && !run.reviewFindings?.length) return undefined;
-    return run.testFailed || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
+    if (run.testFailed === true || hasBlockFindings(run.reviewFindings)) return "qa_fail";
+    if (run.testFailed === false) return "qa_pass";
+    if (run.reviewFindings?.length) return "qa_pass";
+    return undefined;
   }
   if (role === "linter") {
-    if (!hasNotebookText(run.lintResults) && !run.reviewFindings?.length) return undefined;
-    return run.lintErrors || hasBlockFindings(run.reviewFindings) ? "qa_fail" : "qa_pass";
+    if (run.lintErrors === true || hasBlockFindings(run.reviewFindings)) return "qa_fail";
+    if (run.lintErrors === false) return "qa_pass";
+    if (run.reviewFindings?.length) return "qa_pass";
+    return undefined;
   }
   if (role === "demo") return hasNotebookText(run.demoNotes) ? "qa_pass" : undefined;
   if (role === "commit_message")

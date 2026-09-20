@@ -13,6 +13,7 @@ import {
   rememberRejectedFlags,
   resetRejectedFlags,
   stripFlags,
+  nextFixModel,
   resolveChildModel,
   stateSectionsForRole,
   toolsForRole,
@@ -373,6 +374,21 @@ test("child models default to the task tier on omp, parent elsewhere", () => {
   assert.equal(resolveChildModel("reviewer", "parent-model", undefined, true), "@task");
   assert.equal(resolveChildModel("scout", "parent-model", { scout: "@smol" }, true), "@smol");
   assert.equal(resolveChildModel("scout", "parent-model", undefined, false), "parent-model");
+  assert.equal(nextFixModel("backend", "fix_test"), "@slow");
+  assert.equal(nextFixModel("reviewer", "fix_test"), undefined);
+  assert.equal(
+    resolveChildModel("backend", "parent-model", undefined, true, "fix_review"),
+    "@slow",
+  );
+  assert.equal(resolveChildModel("backend", "parent-model", undefined, true, "implement"), "@task");
+  assert.equal(
+    resolveChildModel("backend", "parent-model", { backend: "@smol" }, true, "fix_lint"),
+    "@smol",
+  );
+  assert.equal(
+    resolveChildModel("backend", "parent-model", undefined, false, "fix_test"),
+    "parent-model",
+  );
 });
 
 test("implementor tools include edit and write", () => {

@@ -88,6 +88,10 @@ export function applyStateTool(
       section === "filesToChange" ||
       section === "stack" ||
       section === "reviewFindings" ||
+      section === "testFindings" ||
+      section === "lintFindings" ||
+      section === "testResults" ||
+      section === "lintResults" ||
       section === "workItems" ||
       section === "scoutItems"
     ) {

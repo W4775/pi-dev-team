@@ -45,15 +45,15 @@ Answer the planner's picker → review the critic → watch specialists build th
 
 | Step | What happens | Who |
 |------|--------------|-----|
-| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo | children |
+| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo. **Skipped** when the task already names a file (and the repo is not multi-service) | children |
 | **Plan** | Planner grills you (picker), writes spec; critic may pause for Accept / Reject | you + child |
-| **Design** | HTML mockup only if the planner stored `wantMockup` (web + frontend) | you |
-| **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
-| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Each parks after 3 failed fix rounds until `/devteam continue` | children |
+| **Design** | After the spec is approved, web+frontend jobs **ask** unless `wantMockup` was already set | you |
+| **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items — **skipped** when there is one layer, or every needed layer already has `filesToChange`. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
+| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Pass/fail comes from **exit codes** and `[block]` findings, not a scan of the log dump. Each parks after 3 failed fix rounds until `/devteam continue`. Fixer implementors use `@slow` | children |
 | **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Headed Playwright, then you accept or request changes (max 2 demos) | you + child |
 | **Ship** | Drafts a conventional commit — *never commits* | child |
 
-Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo @task`). A child that exits without the notebook evidence for its role **stops the job** instead of inferring a pass.
+Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo @task`, `@slow` for implementors fixing a failed review/test/lint). A child that exits without the notebook evidence for its role **stops the job** instead of inferring a pass.
 
 ---
 
@@ -71,7 +71,7 @@ Planner and designer stay in your session. Everyone else is an isolated child (`
 | `/devteam mockup` | Open the HTML mockup |
 | `/devteam clear` | Wipe the current job |
 
-At demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
+At mockup or demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
 
 ---
 
@@ -79,20 +79,27 @@ At demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test 
 
 ```mermaid
 flowchart TD
-    A["/devteam task"] --> SO[Scout orchestrator]
+    A["/devteam task"] --> SK{task names a file?}
+    SK -->|yes · one service| P
+    SK -->|no| SO[Scout orchestrator]
     SO --> SC[Scouts · parallel]
     SC --> P[Planner · picker]
     P --> C[Plan critic]
     C -->|revise| PR[Plan review]
     PR -->|accepted items| P
-    PR -->|keep spec| O
-    C -->|approve| MU{wantMockup?}
-    MU -->|yes · web UI| DS[Designer]
+    PR -->|keep spec| BI
+    C -->|approve| MU{web UI mockup?}
+    MU -->|unset · ask| MO[Mockup opt-in]
+    MO -->|yes| DS[Designer]
+    MO -->|no| BI
+    MU -->|already yes| DS
     DS --> DC[Design critic]
     DC -->|revise| DS
-    DC -->|approve| O
-    MU -->|no| O[Orchestrator]
-    O --> B[Specialists · waves]
+    DC -->|approve| BI
+    MU -->|no| BI{orchestrator needed?}
+    BI -->|one layer or files known| B[Specialists · waves]
+    BI -->|else| O[Orchestrator]
+    O --> B
     B --> R[Reviewer · whole slice]
     R -->|blocks| FX[Fix matching specialists]
     FX --> R
@@ -152,7 +159,7 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 
 - `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
 - `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
-- `models` — alias per role (OMP `@task` by default; Pi uses session model)
+- `models` — alias per role (OMP `@task` by default, `@slow` for implementors on a fix round; Pi uses session model)
 - `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
 - `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 
@@ -189,7 +196,7 @@ Budgets: `200` calls for builders/review/test/lint/demo, `40` scouts, `80` speci
 |------|-----|
 | Planner / Critics / Reviewer | Read-only |
 | Designer | `devteam_mockup` only |
-| Implementors | Edit tree, no `.env`/keys, no `git commit` |
+| Implementors | Edit tree, no `.env`/keys, no `git commit`, no `rm -rf` / git rewrite / package installs / curl / sudo |
 | Demo | `serve` + Playwright, writes `demo/` only |
 
 Optional per-layer `paths` globs further restrict writes.
