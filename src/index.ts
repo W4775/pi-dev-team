@@ -49,9 +49,13 @@ import {
   parseYesNo,
   phaseOf,
   proceedAfterPlan,
+  scoutSkipNeedsJudge,
+  shouldSkipScout,
   startScouting,
   step,
 } from "./pipeline.ts";
+import { inferScoutSkipFromJudge } from "./judge.ts";
+import { isOmpHost } from "./spawn.ts";
 import { loadRolePrompt } from "./roles.ts";
 import {
   clearRunFiles,
@@ -1014,7 +1018,17 @@ export default function (pi: ExtensionAPI) {
     run.gitBaseline = git.baseline;
     run.dirtyAtStart = git.dirty;
     run.cwd = ctx.cwd;
-    run = startScouting(run);
+    const heuristicSkip = shouldSkipScout(run);
+    let skipScout = heuristicSkip;
+    if (scoutSkipNeedsJudge(run)) {
+      skipScout =
+        (await inferScoutSkipFromJudge({
+          run,
+          cwd: ctx.cwd,
+          omp: isOmpHost(),
+        })) === true;
+    }
+    run = startScouting(run, skipScout);
     persist(run);
     const skippedScout = run.stage === "planner";
     logProgress(ctx, {
@@ -1022,7 +1036,9 @@ export default function (pi: ExtensionAPI) {
       stage: run.stage,
       role: skippedScout ? "planner" : "planner_orchestrator",
       text: skippedScout
-        ? "Planner. Scouts skipped — the task already names the files."
+        ? heuristicSkip
+          ? "Planner. Scouts skipped — the task already names the files."
+          : "Planner. Scouts skipped via @tiny — the task already names the files."
         : "Scouting the repo. The planner will ask questions after that.",
     });
     if (git.dirty && ctx.hasUI) {

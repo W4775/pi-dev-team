@@ -49,11 +49,11 @@ Answer the planner's picker → review the critic → watch specialists build th
 | **Plan** | Planner grills you (picker), writes spec; critic may pause for Accept / Reject | you + child |
 | **Design** | After the spec is approved, web+frontend jobs **ask** unless `wantMockup` was already set | you |
 | **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items — **skipped** when there is one layer, or every needed layer already has `filesToChange`. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
-| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Pass/fail comes from **exit codes** and `[block]` findings, not a scan of the log dump. Each parks after 3 failed fix rounds until `/devteam continue`. Fixer implementors use `@slow` | children |
+| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Pass/fail comes from **exit codes**, `[block]` findings, and (when those miss) `@tiny`. Each parks after 3 failed fix rounds until `/devteam continue`. Environment/transient bash failures park instead of sending implementors. Reviewer and fixer implementors use `@slow` | children |
 | **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Headed Playwright, then you accept or request changes (max 2 demos) | you + child |
 | **Ship** | Drafts a conventional commit — *never commits* | child |
 
-Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo @task`, `@slow` for implementors fixing a failed review/test/lint). A child that exits without the notebook evidence for its role **stops the job** instead of inferring a pass.
+Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo` with `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` for the commit draft). A child that exits without a handoff is inferred from the notebook first, then `@tiny`; if both miss, the job **stops**.
 
 ---
 
@@ -158,7 +158,7 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 
 - `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
 - `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
-- `models` — alias per role (OMP `@task` by default, `@slow` for implementors on a fix round; Pi uses session model)
+- `models` — alias per role (OMP: `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` commit message; Pi uses session model)
 - `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
 - `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 

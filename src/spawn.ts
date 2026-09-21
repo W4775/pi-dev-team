@@ -90,6 +90,9 @@ export function toolsForRole(role: IsolatedRole): string[] {
 }
 export const DEFAULT_CHILD_MODEL = "@task";
 export const FIX_CHILD_MODEL = "@slow";
+export const CHEAP_CHILD_MODEL = "@smol";
+export const REVIEW_CHILD_MODEL = "@slow";
+export const COMMIT_CHILD_MODEL = "@commit";
 
 const FIX_STAGES = new Set<Stage>(["fix_review", "fix_test", "fix_lint"]);
 
@@ -103,6 +106,22 @@ export function nextFixModel(role: IsolatedRole, stage: Stage | undefined): stri
   return FIX_CHILD_MODEL;
 }
 
+/** Built-in OMP role aliases. Config `models.<role>` still wins. */
+export function defaultChildModel(role: IsolatedRole): string {
+  switch (role) {
+    case "scout":
+    case "tester":
+    case "linter":
+      return CHEAP_CHILD_MODEL;
+    case "reviewer":
+      return REVIEW_CHILD_MODEL;
+    case "commit_message":
+      return COMMIT_CHILD_MODEL;
+    default:
+      return DEFAULT_CHILD_MODEL;
+  }
+}
+
 export function resolveChildModel(
   role: IsolatedRole,
   parentModel: string | undefined,
@@ -113,7 +132,7 @@ export function resolveChildModel(
   const override = configured?.[role]?.trim();
   if (override) return override;
   if (!ompHost) return parentModel;
-  return nextFixModel(role, stage) ?? DEFAULT_CHILD_MODEL;
+  return nextFixModel(role, stage) ?? defaultChildModel(role);
 }
 export type ChildCliOptions = {
   extensionPath: string;

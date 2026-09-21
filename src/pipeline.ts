@@ -420,8 +420,14 @@ export function shouldSkipScout(run: Pick<RunState, "task" | "stack">): boolean 
   return taskNamesAFile(run.task);
 }
 
-export function startScouting(run: RunState): RunState {
-  if (shouldSkipScout(run)) {
+/** True when heuristics neither skip nor force scout — @tiny may still skip. */
+export function scoutSkipNeedsJudge(run: Pick<RunState, "task" | "stack">): boolean {
+  if (isMultiService(run.stack?.services)) return false;
+  return !taskNamesAFile(run.task);
+}
+
+export function startScouting(run: RunState, skipScout = shouldSkipScout(run)): RunState {
+  if (skipScout) {
     return goToStage(run, "planner", {
       currentRole: "planner",
       pauseReason: undefined,

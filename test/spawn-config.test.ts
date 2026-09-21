@@ -14,6 +14,7 @@ import {
   resetRejectedFlags,
   stripFlags,
   nextFixModel,
+  defaultChildModel,
   resolveChildModel,
   stateSectionsForRole,
   toolsForRole,
@@ -368,11 +369,21 @@ test("child prompt scopes state reads per role", () => {
   assert.match(prompt, /fetch nothing else/);
 });
 
-test("child models default to the task tier on omp, parent elsewhere", () => {
-  assert.equal(resolveChildModel("scout", "parent-model", undefined, true), "@task");
+test("child models use built-in OMP roles, parent elsewhere", () => {
+  assert.equal(defaultChildModel("scout"), "@smol");
+  assert.equal(defaultChildModel("reviewer"), "@slow");
+  assert.equal(defaultChildModel("commit_message"), "@commit");
+  assert.equal(defaultChildModel("backend"), "@task");
+  assert.equal(resolveChildModel("scout", "parent-model", undefined, true), "@smol");
+  assert.equal(resolveChildModel("tester", "parent-model", undefined, true), "@smol");
+  assert.equal(resolveChildModel("linter", "parent-model", undefined, true), "@smol");
   assert.equal(resolveChildModel("backend", "parent-model", undefined, true), "@task");
-  assert.equal(resolveChildModel("reviewer", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("orchestrator", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("plan_critic", "parent-model", undefined, true), "@task");
+  assert.equal(resolveChildModel("reviewer", "parent-model", undefined, true), "@slow");
+  assert.equal(resolveChildModel("commit_message", "parent-model", undefined, true), "@commit");
   assert.equal(resolveChildModel("scout", "parent-model", { scout: "@smol" }, true), "@smol");
+  assert.equal(resolveChildModel("scout", "parent-model", { scout: "@task" }, true), "@task");
   assert.equal(resolveChildModel("scout", "parent-model", undefined, false), "parent-model");
   assert.equal(nextFixModel("backend", "fix_test"), "@slow");
   assert.equal(nextFixModel("reviewer", "fix_test"), undefined);

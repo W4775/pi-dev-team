@@ -23,6 +23,7 @@ import {
   shouldOfferMockup,
   neededImplementors,
   shouldSkipImplementationOrchestrator,
+  scoutSkipNeedsJudge,
   shouldSkipScout,
   startImplementation,
   startScouting,
@@ -1101,6 +1102,12 @@ test("scout is skipped when the task already names a file", () => {
   assert.equal(taskNamesAFile("Add a settings page"), false);
   assert.equal(taskNamesAFile("Fix src/pipeline.ts lint"), true);
   assert.equal(shouldSkipScout(run({ task: "Add a settings page" })), false);
+  assert.equal(scoutSkipNeedsJudge(run({ task: "Add a settings page" })), true);
+  assert.equal(scoutSkipNeedsJudge(run({ task: "Fix src/index.ts" })), false);
+  const judgedSkip = startScouting(run({ task: "Add a settings page" }), true);
+  assert.equal(judgedSkip.stage, "planner");
+  const judgedKeep = startScouting(run({ task: "Add a settings page" }), false);
+  assert.equal(judgedKeep.stage, "scout_orchestrate");
   const named = startScouting(run({ task: "Fix src/index.ts" }));
   assert.equal(named.stage, "planner");
   assert.equal(named.currentRole, "planner");
@@ -1146,6 +1153,7 @@ test("scout is skipped when the task already names a file", () => {
     }),
   );
   assert.equal(polyglot.stage, "scout_orchestrate");
+  assert.equal(scoutSkipNeedsJudge(polyglot), false);
 });
 
 test("implementation orchestrator is skipped when one layer or every layer has files", () => {

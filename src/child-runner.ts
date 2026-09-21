@@ -13,8 +13,15 @@ import {
 } from "./child-progress.ts";
 import { detectStack } from "./detect-stack.ts";
 import { projectTrusted } from "./host-compat.ts";
+import {
+  applyBashFailureClass,
+  BASH_FAILURE_ADVICE,
+  inferBashFailureFromJudge,
+  inferHandoffFromJudge,
+  type JudgeComplete,
+} from "./judge.ts";
 import type { ExtensionContext } from "./pi-host.ts";
-import { reviewScope, stackLayerForRole, step } from "./pipeline.ts";
+import { inferHandoffAction, reviewScope, stackLayerForRole, step } from "./pipeline.ts";
 import { loadRolePrompt } from "./roles.ts";
 import { serviceByName } from "./services.ts";
 import { resolveSkillsForLayer } from "./skills-resolve.ts";
@@ -77,6 +84,7 @@ export type ChildRunnerDeps = {
   modelId: (ctx: ExtensionContext) => string | undefined;
   thinking: (ctx: ExtensionContext) => string | undefined;
   isOmp?: () => boolean;
+  judgeComplete?: JudgeComplete;
   activities: Map<string, ChildActivity>;
   aborts: Set<() => void>;
   getAbortChild: () => (() => void) | undefined;
@@ -440,16 +448,77 @@ export function createChildRunner(deps: ChildRunnerDeps) {
       return { ok: true };
     }
 
-    const bashFailed =
+    let bashFailed =
       (role === "tester" || role === "linter") && !after.pendingHandoff
         ? bashFailedFromChildOutput(result.stdout)
         : undefined;
+    let current = deps.store.load() ?? after;
+    const qaUnset =
+      role === "tester"
+        ? current.testFailed === undefined
+        : role === "linter"
+          ? current.lintErrors === undefined
+          : false;
+    if (
+      (role === "tester" || role === "linter") &&
+      !current.pendingHandoff &&
+      qaUnset &&
+      bashFailed !== false
+    ) {
+      const klass = await inferBashFailureFromJudge({
+        role,
+        stdout: result.stdout,
+        heuristic: bashFailed,
+        complete: deps.judgeComplete,
+        omp,
+        cwd: ctx.cwd,
+      });
+      const applied = applyBashFailureClass(bashFailed, klass);
+      if (applied.halt) {
+        const error = `${label}: ${applied.halt}. ${BASH_FAILURE_ADVICE[applied.halt]} /devteam continue retries.`;
+        deps.persist({
+          ...current,
+          pipelineLocked: false,
+          halted: true,
+          lastError: error,
+          currentStatus: error,
+          currentRole: role,
+        });
+        deps.logProgress(ctx, { kind: "error", role: activity.role, text: error }, "warning");
+        return { ok: false, error };
+      }
+      bashFailed = applied.failed;
+    }
+    if (bashFailed !== undefined) {
+      if (role === "tester" && current.testFailed === undefined) {
+        current = deps.persist({ ...current, testFailed: bashFailed });
+      } else if (role === "linter" && current.lintErrors === undefined) {
+        current = deps.persist({ ...current, lintErrors: bashFailed });
+      }
+    }
+    if (!current.pendingHandoff && !inferHandoffAction(role, current)) {
+      const judged = await inferHandoffFromJudge({
+        role,
+        run: current,
+        childStdout: result.stdout,
+        complete: deps.judgeComplete,
+        omp,
+        cwd: ctx.cwd,
+      });
+      if (judged) {
+        current = deps.persist({
+          ...current,
+          pendingHandoff: { action: judged, summary: "inferred by @tiny" },
+        });
+        deps.logProgress(ctx, {
+          kind: "stage",
+          role: activity.role,
+          text: `${label} inferred ${judged} via @tiny`,
+        });
+      }
+    }
     const resolved = deps.persist(
-      step(
-        deps.store.load() ?? after,
-        { type: "child_exit", role, bashFailed, globs: config?.paths },
-        config?.paths,
-      ),
+      step(current, { type: "child_exit", role, bashFailed, globs: config?.paths }, config?.paths),
     );
     if (resolved.pendingHandoff || resolved.stage !== locked.stage || resolved.halted) {
       return { ok: true };
