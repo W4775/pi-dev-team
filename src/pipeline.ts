@@ -1175,3 +1175,114 @@ export function inferHandoffAction(
     return run.commitMessageDraft?.trim() ? "commit_drafted" : undefined;
   return undefined;
 }
+
+export type StepEvent =
+  | { type: "handoff"; action: HandoffAction; globs?: ProjectConfig["paths"] }
+  | { type: "skip" }
+  | { type: "continue" }
+  | { type: "stop" }
+  | { type: "opt_in"; yes: boolean }
+  | {
+      type: "critique";
+      decisions: Array<{ id: string; decision: "accept" | "reject"; userNote?: string }>;
+    }
+  | { type: "demo_review"; accept: boolean; feedback?: string }
+  | {
+      type: "child_exit";
+      role: RoleName;
+      bashFailed?: boolean;
+      globs?: ProjectConfig["paths"];
+    };
+
+export type RunPhase =
+  | "halted"
+  | "done"
+  | "error"
+  | "ask_plan"
+  | "ask_demo"
+  | "ask_opt_in"
+  | "kick_parent"
+  | "spawn_scouts"
+  | "spawn_work"
+  | "spawn_child"
+  | "idle";
+
+function globsOf(event: StepEvent | undefined, fallback?: ProjectConfig["paths"]) {
+  if (event && "globs" in event && event.globs) return event.globs;
+  return fallback;
+}
+
+function applyPendingHandoff(run: RunState, globs?: ProjectConfig["paths"]): RunState {
+  if (!run.pendingHandoff) return run;
+  return applyHandoff(run, run.pendingHandoff.action, globs);
+}
+
+function applyChildExit(
+  run: RunState,
+  event: Extract<StepEvent, { type: "child_exit" }>,
+): RunState {
+  let current = run;
+  if (event.bashFailed !== undefined) {
+    if (event.role === "tester" && current.testFailed === undefined) {
+      current = stamp(current, { testFailed: event.bashFailed });
+    } else if (event.role === "linter" && current.lintErrors === undefined) {
+      current = stamp(current, { lintErrors: event.bashFailed });
+    }
+  }
+  if (!current.pendingHandoff) {
+    const inferred = inferHandoffAction(event.role, current);
+    if (inferred) {
+      current = stamp(current, {
+        pendingHandoff: { action: inferred, summary: "inferred from child exit" },
+      });
+    }
+  }
+  return applyPendingHandoff(current, event.globs);
+}
+
+function applyEvent(run: RunState, event: StepEvent): RunState {
+  switch (event.type) {
+    case "handoff":
+      return applyHandoff(run, event.action, event.globs);
+    case "skip":
+      return applySkip(run);
+    case "continue":
+      return applyContinue(run);
+    case "stop":
+      return applyStop(run);
+    case "opt_in":
+      if (run.stage === "mockup_opt_in") return acceptMockupChoice(run, event.yes);
+      if (run.stage === "demo_opt_in") return acceptDemoChoice(run, event.yes);
+      return run;
+    case "critique":
+      return applyCritiqueDecisions(run, event.decisions);
+    case "demo_review":
+      return applyDemoReview(run, event.accept, event.feedback);
+    case "child_exit":
+      return applyChildExit(run, event);
+  }
+}
+
+/** One write entry for the run stepper. Named helpers remain for existing tests. */
+export function step(run: RunState, event?: StepEvent, globs?: ProjectConfig["paths"]): RunState {
+  let next = event ? applyEvent(run, event) : run;
+  next = applyPendingHandoff(next, globsOf(event, globs));
+  return autoResumeGate(next);
+}
+
+/** Read-only I/O class for the plugin after `step`. Does not mutate the run. */
+export function phaseOf(run: RunState): RunPhase {
+  if (run.halted) return "halted";
+  if (run.stage === "done") return "done";
+  if (run.stage === "error") return "error";
+  if (needsUserReview(run.stage)) return "ask_plan";
+  if (run.stage === "demo_review") return "ask_demo";
+  if (needsParentKick(run.stage)) return "kick_parent";
+  if (run.stage === "demo_opt_in" || run.stage === "mockup_opt_in") return "ask_opt_in";
+  if (needsIsolatedChild(run.stage)) {
+    if (run.stage === "scout" && (run.scoutItems?.length ?? 0) > 0) return "spawn_scouts";
+    if (run.stage === "implement" && (run.workItems?.length ?? 0) > 0) return "spawn_work";
+    return "spawn_child";
+  }
+  return "idle";
+}

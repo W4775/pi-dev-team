@@ -10,6 +10,8 @@ import {
   applySkip,
   applyStop,
   applyCritiqueDecisions,
+  phaseOf,
+  step,
   attachRunForResume,
   autoResumeGate,
   canFix,
@@ -1181,4 +1183,66 @@ test("implementation orchestrator is skipped when one layer or every layer has f
   );
   const many = startImplementation(run({ layersNeeded: ["database", "backend", "frontend"] }));
   assert.equal(many.stage, "orchestrate");
+});
+
+test("step applies pending handoff then auto-resumes", () => {
+  const next = step(
+    run({
+      stage: "reviewer",
+      pendingHandoff: { action: "qa_pass", summary: "child" },
+    }),
+  );
+  assert.equal(next.stage, "tester");
+  assert.equal(next.pendingHandoff, undefined);
+});
+
+test("step child_exit infers a missing handoff", () => {
+  const next = step(
+    run({ stage: "reviewer", reviewFindings: [{ axis: "spec", severity: "note", text: "ok" }] }),
+    { type: "child_exit", role: "reviewer" },
+  );
+  assert.equal(next.stage, "tester");
+});
+
+test("step opt_in is the mockup yes/no path", () => {
+  const yes = step(run({ stage: "mockup_opt_in", layersNeeded: ["frontend"], uiSurface: "web" }), {
+    type: "opt_in",
+    yes: true,
+  });
+  const no = step(run({ stage: "mockup_opt_in", layersNeeded: ["frontend"], uiSurface: "web" }), {
+    type: "opt_in",
+    yes: false,
+  });
+  assert.equal(yes.stage, "designer");
+  assert.equal(no.stage, "implement");
+});
+
+test("phaseOf classifies plugin I/O without mutating the run", () => {
+  assert.equal(phaseOf(run({ halted: true, stage: "implement" })), "halted");
+  assert.equal(phaseOf(run({ stage: "done" })), "done");
+  assert.equal(phaseOf(run({ stage: "plan_review" })), "ask_plan");
+  assert.equal(phaseOf(run({ stage: "planner" })), "kick_parent");
+  assert.equal(phaseOf(run({ stage: "mockup_opt_in" })), "ask_opt_in");
+  assert.equal(phaseOf(run({ stage: "demo_review" })), "ask_demo");
+  assert.equal(phaseOf(run({ stage: "reviewer" })), "spawn_child");
+  assert.equal(
+    phaseOf(
+      run({
+        stage: "implement",
+        workItems: [
+          {
+            id: "w1",
+            layer: "backend",
+            title: "api",
+            files: ["src/a.ts"],
+            dependsOn: [],
+            status: "pending",
+            attempts: 0,
+          },
+        ],
+      }),
+    ),
+    "spawn_work",
+  );
+  assert.equal(phaseOf(run({ stage: "idle" })), "idle");
 });

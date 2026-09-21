@@ -1,5 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -12,24 +11,15 @@ import {
   type ExtensionContext,
 } from "./pi-host.ts";
 import { onAgentIdle, projectTrusted, sessionIdFromContext } from "./host-compat.ts";
-import {
-  loadCatalog,
-  bundledSkillDir,
-  thisExtensionEntry,
-  workflowSkillsForRole,
-} from "./catalog.ts";
+import { loadCatalog } from "./catalog.ts";
 import { loadDevteamConfig } from "./config.ts";
 import { parseDevteamArgs } from "./command-args.ts";
 import { listJobs, loadJob, newJobId, renderJobList, resolveJobRef } from "./jobs.ts";
-import { formatChildFailure, spawnPiChild } from "./child-process.ts";
+import { processChildHost, createChildRunner } from "./child-runner.ts";
 import {
   activityLine,
-  bashFailedFromChildOutput,
   formatElapsed,
-  isRepeatedToolLoop,
   resolveChildIdleMs,
-  resolveMaxToolCalls,
-  resolveRepeatToolAbort,
   type ChildActivity,
 } from "./child-progress.ts";
 import { detectStack } from "./detect-stack.ts";
@@ -49,37 +39,20 @@ import {
   applyContinue,
   applyCritiqueDecisions,
   applyDemoReview,
-  applyHandoff,
   applySkip,
   applyStop,
   attachRunForResume,
-  autoResumeGate,
   continueHint,
   enterReview,
   goToStage,
-  inferHandoffAction,
-  needsIsolatedChild,
   needsParentKick,
-  needsUserReview,
   parseYesNo,
+  phaseOf,
   proceedAfterPlan,
-  reviewScope,
-  stackLayerForRole,
   startScouting,
+  step,
 } from "./pipeline.ts";
 import { loadRolePrompt } from "./roles.ts";
-import { resolveSkillsForLayer } from "./skills-resolve.ts";
-import {
-  adaptArgsForUnknownFlags,
-  buildChildCliArgs,
-  childProcessEnv,
-  childUserPrompt,
-  isOmpHost,
-  parseUnknownFlags,
-  rememberRejectedFlags,
-  resolveChildModel,
-  toolsForRole,
-} from "./spawn.ts";
 import {
   clearRunFiles,
   emptyRun,
@@ -96,24 +69,20 @@ import type {
   Catalog,
   IsolatedRole,
   ProjectConfig,
-  ResolvedSkill,
   RoleName,
   RunState,
-  ServiceInfo,
   WorkItem,
   ChildAssignment,
 } from "./types.ts";
 import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS } from "./types.ts";
-import { findItem, itemsRemaining, nextWave, retryableItems, setItemStatus } from "./work.ts";
-import { compileScoutNotes, findScout, nextScoutWave, setScoutStatus } from "./scout.ts";
+import { findItem, itemsRemaining, nextWave, retryableItems } from "./work.ts";
+import { compileScoutNotes, nextScoutWave } from "./scout.ts";
 import {
   applyChrome,
   clearChrome,
-  lifecycleText,
   postSessionLine,
   registerDevteamRenderers,
   tickProgressFeed,
-  toolLogText,
 } from "./ui-progress.ts";
 import { formatAskAnswers, promptQuestions, type AskQuestion } from "./ask-ui.ts";
 import { parseCritiqueItems } from "./critique.ts";
@@ -375,6 +344,30 @@ export default function (pi: ExtensionAPI) {
     return run;
   }
 
+  const childRunner = createChildRunner({
+    host: processChildHost(),
+    store,
+    persist,
+    statePath,
+    agentDir: agentDirSafe,
+    catalog: getCatalog,
+    config: () => config,
+    trusted: projectTrusted,
+    modelId,
+    thinking: thinkingOf,
+    activities: childActivities,
+    aborts: childAborts,
+    getAbortChild: () => abortChild,
+    setAbortChild: (fn) => {
+      abortChild = fn;
+    },
+    startProgressReporting,
+    stopProgressReporting,
+    logProgress,
+    notify,
+    refreshUi,
+  });
+
   function jobsInAgent() {
     return listJobs(agentDirSafe(), jobId);
   }
@@ -424,7 +417,7 @@ export default function (pi: ExtensionAPI) {
       `Resumed job ${picked.jobId} at ${attached.stage} (progress kept). ${attached.task || ""}`.trim(),
     );
 
-    const next = persist(autoResumeGate(attached));
+    const next = persist(step(attached));
     if (next.stage === "done") {
       applyParentTools(next);
       refreshUi(ctx, next);
@@ -487,70 +480,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     pi.setActiveTools(intersect(all, ["read", "grep", "find", "ls", "glob", "devteam_state"]));
-  }
-
-  function skillDirsForRole(
-    role: IsolatedRole,
-    run: RunState,
-    cwd: string,
-    service?: ServiceInfo,
-  ): string[] {
-    const diagnosing = run.stage === "fix_test";
-    const workflow = workflowSkillsForRole(role, { diagnosing }).map((name) =>
-      bundledSkillDir(name),
-    );
-    const layer = stackLayerForRole(role);
-    if (
-      !layer ||
-      role === "linter" ||
-      role === "commit_message" ||
-      role === "plan_critic" ||
-      role === "design_critic" ||
-      role === "orchestrator" ||
-      role === "planner_orchestrator" ||
-      role === "scout"
-    ) {
-      return workflow.filter((dir) => dir.length > 0);
-    }
-    const detection = run.stack ?? detectStack(getCatalog(), { cwd, config: config ?? undefined });
-    const resolved = resolveSkillsForLayer({
-      cwd,
-      agentDir: agentDirSafe(),
-      config: config ?? undefined,
-      catalog: getCatalog(),
-      detection,
-      layer,
-      service,
-    });
-    mutateRun(statePath(), agentDirSafe(), (current) => ({
-      ...current,
-      resolvedSkills: { ...current.resolvedSkills, [role]: resolved },
-    }));
-    const loaded = resolved.filter((skill) => skill.source !== "unresolved" && skill.dir);
-    return [...workflow, ...loaded.map((skill) => skill.dir)];
-  }
-
-  function writeRolePrompt(role: IsolatedRole, extras: ResolvedSkill[], taskId?: string): string {
-    const overflow = extras
-      .filter((skill) => skill.source === "unresolved")
-      .map((skill) => `- ${skill.name}: ${skill.error ?? "unresolved"}`)
-      .join("\n");
-    const body = `${loadRolePrompt(role)}
-
-## Stack skills
-
-Your first actions: call devteam_state (action get), then read each attached skill's SKILL.md.
-Follow /skill:<name> together with TDD at agreed seams when implementing.
-Do not start a nested /devteam pipeline. Do not git commit.
-${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow}\n` : ""}
-`;
-    const file = join(
-      dirname(statePath()),
-      taskId ? `${role}.${taskId}.prompt.md` : `${role}.prompt.md`,
-    );
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, body);
-    return file;
   }
 
   function modelId(ctx: ExtensionContext): string | undefined {
@@ -688,300 +617,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     run: RunState,
     role: IsolatedRole,
     assignment?: ChildAssignment,
-  ): Promise<{ ok: boolean; error?: string }> {
-    const locked = persist({
-      ...run,
-      pipelineLocked: true,
-      currentRole: role,
-      updatedAt: new Date().toISOString(),
-    });
-    refreshUi(ctx, locked);
-    const services = locked.stack?.services ?? [];
-    const service = serviceByName(services, assignment?.service ?? locked.currentService);
-    const label = assignment
-      ? `${role.replaceAll("_", " ")} · ${assignment.id}`
-      : service
-        ? `${role.replaceAll("_", " ")} · ${service.name}`
-        : role.replaceAll("_", " ");
-
-    const extras = (locked.resolvedSkills?.[role] ?? []) as ResolvedSkill[];
-    const dirs = skillDirsForRole(role, locked, ctx.cwd, service);
-    const latest = store.load() ?? locked;
-    const promptFile = writeRolePrompt(
-      role,
-      latest.resolvedSkills?.[role] ?? extras,
-      assignment?.id,
-    );
-    const unresolved = (latest.resolvedSkills?.[role] ?? []).filter(
-      (skill) => skill.source === "unresolved",
-    );
-    if (unresolved.length && ctx.hasUI) {
-      ctx.ui.notify(
-        `Stack skill fallback: ${unresolved.map((skill) => skill.name).join(", ")}. Continuing with workflow skills.`,
-        "warning",
-      );
-    }
-
-    const budget = resolveMaxToolCalls(config?.maxToolCalls, role);
-    const repeatLimit = resolveRepeatToolAbort(config?.repeatToolAbort);
-    const promptExtras = role === "reviewer" ? reviewScope(latest) : {};
-    let args = buildChildCliArgs({
-      extensionPath: thisExtensionEntry(),
-      rolePromptFile: promptFile,
-      role,
-      statePath: statePath(),
-      skillDirs: dirs,
-      tools: toolsForRole(role),
-      model: resolveChildModel(role, modelId(ctx), config?.models, isOmpHost(), locked.stage),
-      thinking: thinkingOf(ctx),
-      trusted: projectTrusted(ctx),
-      serviceName: service?.name,
-      taskId: assignment?.id,
-      prompt: childUserPrompt(
-        role,
-        latest.task,
-        dirs,
-        service,
-        services,
-        assignment,
-        budget,
-        promptExtras,
-      ),
-    });
-    const activityKey = assignment?.id ?? role;
-    const activity: ChildActivity = {
-      role: assignment ? `${role}/${assignment.id}` : service ? `${role}/${service.name}` : role,
-      startedAt: Date.now(),
-      label: "",
-      toolCalls: 0,
-      lastEventAt: Date.now(),
-      recentTools: [],
-    };
-    childActivities.set(activityKey, activity);
-    startProgressReporting(ctx);
-    logProgress(ctx, {
-      kind: "start",
-      role: activity.role,
-      stage: locked.stage,
-      text: lifecycleText("start", label),
-    });
-
-    let abortReason: string | undefined;
-    const runChild = async () => {
-      abortReason = undefined;
-      activity.toolCalls = 0;
-      activity.recentTools = [];
-      activity.label = "";
-      let stopChild = () => {};
-      const spawned = spawnPiChild({
-        args,
-        cwd: ctx.cwd,
-        env: childProcessEnv(role, statePath(), process.env, {
-          serviceName: service?.name,
-          taskId: assignment?.id,
-        }),
-        onOutput: () => {
-          activity.lastEventAt = Date.now();
-        },
-        onProgress: (update) => {
-          if (update.kind === "tool") {
-            activity.toolCalls += 1;
-            activity.recentTools.push(update.label);
-            if (activity.recentTools.length > 40)
-              activity.recentTools.splice(0, activity.recentTools.length - 40);
-            if (repeatLimit && isRepeatedToolLoop(activity.recentTools, repeatLimit)) {
-              abortReason = `${label} repeated ${repeatLimit} identical tool calls and was stopped.`;
-              stopChild();
-              return;
-            }
-          }
-          const shouldPost =
-            update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
-          activity.label = update.label;
-          activity.lastEventAt = Date.now();
-          if (shouldPost) {
-            logProgress(ctx, {
-              kind: update.kind === "tool" ? "tool" : "stage",
-              role: activity.role,
-              label: update.label,
-              text: toolLogText(activity.role, update.label),
-            });
-          } else {
-            refreshUi(ctx, store.load());
-          }
-          if (activity.toolCalls >= budget) {
-            abortReason = `${label} hit the ${budget} tool-call budget and was stopped.`;
-            stopChild();
-          }
-        },
-      });
-      stopChild = spawned.abort;
-      activity.abort = spawned.abort;
-      abortChild = spawned.abort;
-      childAborts.add(spawned.abort);
-      try {
-        return await spawned.done;
-      } finally {
-        childAborts.delete(spawned.abort);
-        if (abortChild === spawned.abort) abortChild = undefined;
-      }
-    };
-
-    let result = await runChild();
-    // Hosts validate argv before loading the extension. If Oh My Pi rejects
-    // Pi flags (-a, --skill, --devteam-*), strip them and retry once learned.
-    for (let attempt = 0; attempt < 2 && result.code !== 0; attempt += 1) {
-      const unknown = parseUnknownFlags(result.output).filter((flag) => args.includes(flag));
-      if (!unknown.length) break;
-      rememberRejectedFlags(unknown);
-      const retryArgs = adaptArgsForUnknownFlags(args, unknown);
-      if (retryArgs.join("\u0000") === args.join("\u0000")) break;
-      args = retryArgs;
-      notify(
-        ctx,
-        `devteam: host rejected ${unknown.join(", ")}; retrying ${label} without them.`,
-        "warning",
-      );
-      result = await runChild();
-    }
-
-    childActivities.delete(activityKey);
-    stopProgressReporting(ctx);
-
-    const next = store.load() ?? latest;
-    if (next.halted || next.stage !== locked.stage) {
-      persist({
-        ...next,
-        pipelineLocked: false,
-        pendingHandoff: next.halted ? undefined : next.pendingHandoff,
-      });
-      logProgress(ctx, {
-        kind: "finish",
-        role: activity.role,
-        text: `${label} ${next.halted ? "stopped" : "skipped"}`,
-      });
-      return { ok: false, error: next.halted ? "stopped by user" : "step skipped" };
-    }
-    if (!assignment) persist({ ...next, pipelineLocked: false });
-
-    const elapsed = formatElapsed(Date.now() - activity.startedAt);
-    const failItem = (error: string) => {
-      if (assignment?.list === "scout") {
-        mutateRun(statePath(), agentDirSafe(), (current) => ({
-          ...current,
-          scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
-            status: "failed",
-            error,
-          }),
-          lastError: error,
-          pipelineLocked: false,
-        }));
-      } else if (assignment) {
-        mutateRun(statePath(), agentDirSafe(), (current) => ({
-          ...current,
-          workItems: setItemStatus(current.workItems, assignment.id, { status: "failed", error }),
-          lastError: error,
-          pipelineLocked: false,
-        }));
-      } else {
-        persist({ ...next, pipelineLocked: false, lastError: error, currentRole: role });
-      }
-      logProgress(
-        ctx,
-        { kind: "error", role: activity.role, text: `${label} failed: ${error}` },
-        "error",
-      );
-      return { ok: false, error };
-    };
-
-    if (result.code !== 0 && abortReason) {
-      return failItem(abortReason);
-    }
-
-    if (activity.toolCalls >= budget && result.code !== 0) {
-      return failItem(
-        `${label} exceeded ${budget} tool calls after ${elapsed} (${activity.label || "last action unknown"}).`,
-      );
-    }
-
-    if (result.code !== 0 && !next.pendingHandoff) {
-      const error = formatChildFailure(role, result, args);
-      if (assignment) return failItem(`${label} failed: ${error}`);
-      persist({ ...next, pipelineLocked: false, lastError: error, currentRole: role });
-      logProgress(
-        ctx,
-        { kind: "error", role: activity.role, text: `${label} failed. ${error}` },
-        "error",
-      );
-      return { ok: false, error };
-    }
-
-    logProgress(ctx, {
-      kind: "finish",
-      role: activity.role,
-      stage: next.stage,
-      text: lifecycleText("finish", label, { elapsed, toolCalls: activity.toolCalls }),
-    });
-
-    const after = store.load() ?? next;
-    if (!assignment && (role === "tester" || role === "linter") && !after.pendingHandoff) {
-      const fromBash = bashFailedFromChildOutput(result.stdout);
-      if (fromBash !== undefined) {
-        if (role === "tester" && after.testFailed === undefined) {
-          persist({ ...after, testFailed: fromBash, pipelineLocked: false });
-        } else if (role === "linter" && after.lintErrors === undefined) {
-          persist({ ...after, lintErrors: fromBash, pipelineLocked: false });
-        }
-      }
-    }
-    const resolved = store.load() ?? after;
-    if (assignment) {
-      const doneAction = assignment.list === "scout" ? "scout_done" : "implementor_done";
-      if (after.pendingHandoff?.action === doneAction) {
-        mutateRun(statePath(), agentDirSafe(), (current) => ({
-          ...current,
-          pendingHandoff: undefined,
-        }));
-      }
-      if (assignment.list === "scout") {
-        const item = findScout(store.load()?.scoutItems, assignment.id);
-        if (item?.status !== "done") {
-          if (!item?.findings?.trim()) {
-            return failItem(`${label} finished without scout findings or a handoff.`);
-          }
-          mutateRun(statePath(), agentDirSafe(), (current) => ({
-            ...current,
-            scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
-              status: "done",
-              error: undefined,
-              findings: item.findings,
-            }),
-          }));
-        }
-      } else {
-        const item = findItem(store.load()?.workItems, assignment.id);
-        if (item?.status !== "done") {
-          return failItem(`${label} finished without implementor_done handoff.`);
-        }
-      }
-      return { ok: true };
-    }
-
-    if (!resolved.pendingHandoff) {
-      const inferred = inferHandoffAction(role, resolved);
-      if (inferred) {
-        persist({
-          ...resolved,
-          pendingHandoff: { action: inferred, summary: "inferred from child exit" },
-          pipelineLocked: false,
-        });
-      } else {
-        const error = `${label} finished without a handoff.`;
-        persist({ ...resolved, pipelineLocked: false, lastError: error, currentRole: role });
-        return { ok: false, error };
-      }
-    }
-    return { ok: true };
+  ) {
+    return childRunner.run(ctx, run, role, assignment);
   }
 
   async function runWave(ctx: ExtensionContext, run: RunState, wave: WorkItem[]): Promise<void> {
@@ -1230,100 +867,73 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     try {
       let run = incoming;
       for (;;) {
-        if (run.halted) {
-          persist({ ...run, pipelineLocked: false });
-          standDown(ctx);
-          applyParentTools(undefined);
-          notify(ctx, continueHint(run));
-          return;
-        }
-
-        if (run.pendingHandoff) {
-          run = persist(applyHandoff(run, run.pendingHandoff.action, config?.paths));
-        }
-
-        if (run.stage === "done") {
-          standDown(ctx);
-          applyParentTools(run);
-          if (ctx.hasUI) {
-            ctx.ui.notify(
-              run.commitMessageDraft
-                ? "devteam: commit message drafted (not committed). See /devteam status."
-                : "devteam: finished.",
-              "info",
-            );
+        run = persist(step(run, undefined, config?.paths));
+        const phase = phaseOf(run);
+        switch (phase) {
+          case "halted":
+            persist({ ...run, pipelineLocked: false });
+            standDown(ctx);
+            applyParentTools(undefined);
+            notify(ctx, continueHint(run));
+            return;
+          case "done":
+            standDown(ctx);
+            applyParentTools(run);
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                run.commitMessageDraft
+                  ? "devteam: commit message drafted (not committed). See /devteam status."
+                  : "devteam: finished.",
+                "info",
+              );
+            }
+            return;
+          case "error":
+            standDown(ctx);
+            applyParentTools(run);
+            return;
+          case "ask_plan": {
+            const reviewed = await presentPlanReview(ctx, run);
+            if (!reviewed || reviewed.halted) return;
+            run = persist(reviewed);
+            continue;
           }
-          return;
-        }
-
-        if (run.stage === "error") {
-          standDown(ctx);
-          applyParentTools(run);
-          return;
-        }
-
-        const resumed = autoResumeGate(run);
-        if (resumed !== run) {
-          run = persist(resumed);
-          continue;
-        }
-
-        if (needsUserReview(run.stage)) {
-          const reviewed = await presentPlanReview(ctx, run);
-          if (!reviewed || reviewed.halted) return;
-          run = persist(reviewed);
-          continue;
-        }
-        if (run.stage === "demo_review") {
-          const reviewed = await presentDemoReview(ctx, run);
-          if (!reviewed || reviewed.halted) return;
-          run = persist(reviewed);
-          continue;
-        }
-
-        if (needsParentKick(run.stage)) {
-          persist(run);
-          await kickParent(ctx, run, {
-            resume: Boolean(run.spec?.trim() || run.planCritique?.reviewed),
-          });
-          return;
-        }
-        if (run.stage === "demo_opt_in") {
-          persist(run);
-          applyParentTools(run);
-          refreshUi(ctx, run);
-          notify(
-            ctx,
-            "QA passed. Want a live headed demo of the change? Answer yes or no, or /devteam skip to finish without one.",
-          );
-          return;
-        }
-        if (run.stage === "mockup_opt_in") {
-          persist(run);
-          applyParentTools(run);
-          refreshUi(ctx, run);
-          notify(
-            ctx,
-            "Want an HTML mockup before implementation? Answer yes or no, or /devteam skip to implement without one.",
-          );
-          return;
-        }
-
-        if (needsIsolatedChild(run.stage)) {
-          if (run.stage === "scout" && (run.scoutItems?.length ?? 0) > 0) {
+          case "ask_demo": {
+            const reviewed = await presentDemoReview(ctx, run);
+            if (!reviewed || reviewed.halted) return;
+            run = persist(reviewed);
+            continue;
+          }
+          case "kick_parent":
+            persist(run);
+            await kickParent(ctx, run, {
+              resume: Boolean(run.spec?.trim() || run.planCritique?.reviewed),
+            });
+            return;
+          case "ask_opt_in":
+            persist(run);
+            applyParentTools(run);
+            refreshUi(ctx, run);
+            notify(
+              ctx,
+              run.stage === "demo_opt_in"
+                ? "QA passed. Want a live headed demo of the change? Answer yes or no, or /devteam skip to finish without one."
+                : "Want an HTML mockup before implementation? Answer yes or no, or /devteam skip to implement without one.",
+            );
+            return;
+          case "spawn_scouts": {
             await runDelegatedScouts(ctx, run);
             const afterScout = store.load();
             if (!afterScout || afterScout.halted) return;
             run = afterScout;
             continue;
           }
-
-          if (run.stage === "implement" && (run.workItems?.length ?? 0) > 0) {
+          case "spawn_work": {
             await runDelegatedWork(ctx, run);
             const afterWork = store.load();
             if (!afterWork || afterWork.halted) return;
             if (afterWork.stage === "implement") {
-              run = persist(autoResumeGate(afterWork));
+              run = persist(step(afterWork, undefined, config?.paths));
               if (run.halted) return;
               if (run.stage === "implement") {
                 applyParentTools(run);
@@ -1340,28 +950,23 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             run = afterWork;
             continue;
           }
-
-          const role = activeRole(run);
-          if (!role || role === "planner" || role === "designer") {
-            persist({
-              ...run,
-              lastError: `No isolated role for stage ${run.stage}`,
-              stage: "error",
-            });
-            return;
-          }
-          await spawnRole(ctx, run, role);
-          const after = store.load();
-          if (!after || after.halted) return;
-          if (after.stage !== run.stage) {
-            run = after;
-            continue;
-          }
-          if (after.stage === "error") {
-            run = after;
-            continue;
-          }
-          if (!after.pendingHandoff) {
+          case "spawn_child": {
+            const role = activeRole(run);
+            if (!role || role === "planner" || role === "designer") {
+              persist({
+                ...run,
+                lastError: `No isolated role for stage ${run.stage}`,
+                stage: "error",
+              });
+              return;
+            }
+            await spawnRole(ctx, run, role);
+            const after = store.load();
+            if (!after || after.halted) return;
+            if (after.stage !== run.stage || after.stage === "error" || after.pendingHandoff) {
+              run = after;
+              continue;
+            }
             if (after.lastError) return;
             if (ctx.hasUI) {
               ctx.ui.notify(
@@ -1371,11 +976,9 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             }
             return;
           }
-          run = after;
-          continue;
+          default:
+            return;
         }
-
-        return;
       }
     } finally {
       advancing = false;
