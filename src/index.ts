@@ -35,6 +35,7 @@ import {
 import { detectStack } from "./detect-stack.ts";
 import { isMultiService, renderServices, serviceByName } from "./services.ts";
 import { captureGit } from "./git.ts";
+import { knowledgePromptBlock, prepareKnowledgeBundle } from "./knowledge.ts";
 import { isolatedRoleFromFlag, gateBash, gateWrite, isWriteTool } from "./permissions.ts";
 import {
   acceptDemoChoice,
@@ -477,7 +478,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (run.interactiveRole === "planner") {
-      pi.setActiveTools(intersect(all, PARENT_PLANNER_TOOLS));
+      const plannerTools = run.knowledgePath
+        ? [...PARENT_PLANNER_TOOLS, "write", "edit"]
+        : PARENT_PLANNER_TOOLS;
+      pi.setActiveTools(intersect(all, plannerTools));
       return;
     }
     pi.setActiveTools(
@@ -592,6 +596,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
             `Task: ${run.task || "(none)"}`,
             notes,
             "First action: devteam_state with action get, then update the spec section.",
+            knowledgePromptBlock(run),
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -616,6 +621,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
               ? `Scout notes (facts about this repo):\n${run.scoutNotes.slice(0, 8000)}`
               : "",
             "First action: devteam_state with action get.",
+            knowledgePromptBlock(run),
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -648,6 +654,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
                 "Name the service each piece of the spec lands in, and write every cross-service contract (endpoint, payload, status codes, errors) explicitly.",
               ].join("\n")
             : "",
+          knowledgePromptBlock(run),
         ]
           .filter(Boolean)
           .join("\n"),
@@ -720,14 +727,17 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
 
     const budget = resolveMaxToolCalls(config?.maxToolCalls, role);
     const repeatLimit = resolveRepeatToolAbort(config?.repeatToolAbort);
-    const scope = role === "reviewer" ? reviewScope(latest) : undefined;
+    const promptExtras = {
+      ...(role === "reviewer" ? reviewScope(latest) : {}),
+      knowledgeBlock: knowledgePromptBlock(latest),
+    };
     let args = buildChildCliArgs({
       extensionPath: thisExtensionEntry(),
       rolePromptFile: promptFile,
       role,
       statePath: statePath(),
       skillDirs: dirs,
-      tools: toolsForRole(role),
+      tools: toolsForRole(role, { knowledge: Boolean(latest.knowledgePath) }),
       model: resolveChildModel(role, modelId(ctx), config?.models, isOmpHost(), locked.stage),
       thinking: thinkingOf(ctx),
       trusted: projectTrusted(ctx),
@@ -741,7 +751,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         services,
         assignment,
         budget,
-        scope,
+        promptExtras,
       ),
     });
     const activityKey = assignment?.id ?? role;
@@ -1407,6 +1417,8 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
     run.gitBaseline = git.baseline;
     run.dirtyAtStart = git.dirty;
     run.cwd = ctx.cwd;
+    const knowledge = prepareKnowledgeBundle(ctx.cwd, config ?? undefined, projectTrusted(ctx));
+    if (knowledge) run.knowledgePath = knowledge.rel;
     run = startScouting(run);
     persist(run);
     const skippedScout = run.stage === "planner";
@@ -1439,7 +1451,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
       "Read or update the current /devteam run notebook stored in the Pi agent directory.",
     promptSnippet: "Get or update /devteam run-state sections",
     promptGuidelines: [
-      "Use devteam_state to persist specs, tickets, notes, and findings. Never write workflow files into the user repository.",
+      "Use devteam_state to persist specs, tickets, notes, and findings. Never write workflow files into the user repository. OKF knowledge concepts live under the project knowledge bundle when enabled — see project-knowledge skill.",
     ],
     parameters: Type.Object({
       action: StringEnum(["get", "replace", "append"] as const),
@@ -1864,6 +1876,7 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
         config ?? undefined,
         service,
         assigned,
+        current?.knowledgePath,
       );
       if (gate.block) return { block: true, reason: gate.reason };
     }

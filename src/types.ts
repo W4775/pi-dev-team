@@ -209,7 +209,8 @@ export type RunState = {
   layersNeeded?: string[];
   filesToChange?: Partial<Record<ImplementorLayer, string[]>>;
   uiSurface?: UiSurface;
-  cwd?: string;
+  /** Relative path to the OKF knowledge bundle when enabled for this run. */
+  knowledgePath?: string;
   planCritique?: PlanCritique;
   originalSpec?: string;
   originalLayersNeeded?: string[];
@@ -281,7 +282,17 @@ export type Catalog = {
   stacks: StackEntry[];
 };
 
+export type KnowledgeConfig = {
+  /** Bundle root relative to the repository. Default `.pi/knowledge`. */
+  path?: string;
+  /** Create starter OKF files when the bundle is missing. Default true. */
+  bootstrap?: boolean;
+  /** Disable git-tracked knowledge reads/writes. Default false. */
+  enabled?: boolean;
+};
+
 export type ProjectConfig = {
+  knowledge?: KnowledgeConfig;
   skills?: {
     frontend?: string[];
     backend?: string[];

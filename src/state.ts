@@ -593,6 +593,7 @@ export function renderRunMarkdown(
     lines.push(
       `- **Git baseline:** ${run.gitBaseline}${run.dirtyAtStart ? " (dirty tree at start)" : ""}`,
     );
+  if (run.knowledgePath) lines.push(`- **Knowledge bundle:** \`${run.knowledgePath}/\``);
   if (run.layersNeeded?.length) lines.push(`- **Layers needed:** ${run.layersNeeded.join(", ")}`);
   if (run.reviewLayer) lines.push(`- **Review layer:** ${run.reviewLayer}`);
   if (run.currentService) lines.push(`- **Current service:** ${run.currentService}`);

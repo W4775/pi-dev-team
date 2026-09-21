@@ -286,7 +286,7 @@ test("orchestrator tools are read-only plus state/handoff", () => {
   assert.ok(tools.includes("devteam_handoff"));
 });
 
-test("planner orchestrator and scout tools are read-only", () => {
+test("planner orchestrator and scout tools are read-only without knowledge", () => {
   for (const role of ["planner_orchestrator", "scout"] as const) {
     const tools = toolsForRole(role);
     assert.equal(tools.includes("edit"), false, role);
@@ -453,4 +453,11 @@ test("glob matcher supports ** and *", () => {
   assert.equal(matchGlob("**/.env", "config/.env"), true);
   assert.equal(matchGlob("*.pem", "key.pem"), true);
   assert.equal(matchGlob("src/app/**", "server/api.ts"), false);
+});
+
+
+test("scout with knowledge may edit and write", () => {
+  const tools = toolsForRole("scout", { knowledge: true });
+  assert.ok(tools.includes("write"));
+  assert.ok(tools.includes("edit"));
 });

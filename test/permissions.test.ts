@@ -142,3 +142,14 @@ test("trusted glob config is not required when paths omitted", () => {
   writeFileSync(join(dir, "src", "a.ts"), "export {}\n");
   assert.equal(gateWrite("general", join(dir, "src", "a.ts"), dir, undefined).block, false);
 });
+
+
+test("scout and planner may write inside the knowledge bundle", () => {
+  const rel = ".pi/knowledge";
+  const ok = gateWrite("scout", "/repo/.pi/knowledge/concepts/repo/auth.md", "/repo", undefined, undefined, undefined, rel);
+  const planner = gateWrite("planner", "/repo/.pi/knowledge/concepts/specs/job.md", "/repo", undefined, undefined, undefined, rel);
+  const blocked = gateWrite("scout", "/repo/src/app.ts", "/repo", undefined, undefined, undefined, rel);
+  assert.equal(ok.block, false);
+  assert.equal(planner.block, false);
+  assert.equal(blocked.block, true);
+});

@@ -140,6 +140,11 @@ Example: schema and API have disjoint files, so they share a wave; UI lists `dep
 
 </details>
 
+
+## 📚 Project knowledge (OKF)
+
+Trusted projects can keep **git-tracked OKF spec docs** under `.pi/knowledge/` — scouts write sourced repo facts; the planner mirrors each run's spec to `concepts/specs/<job-id>.md`. Orchestration still lives in `devteam_state`. Bootstrap also adds a minimal root **`AGENTS.md`** in consumer repos. See [KNOWLEDGE.md](./KNOWLEDGE.md) and [AGENTS.md](./AGENTS.md).
+
 ---
 
 ## ⚙️ Config
@@ -160,6 +165,7 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 - `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
 - `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
 - `models` — alias per role (OMP `@task` by default, `@slow` for implementors on a fix round; Pi uses session model)
+- `knowledge` — OKF bundle path, bootstrap, enable/disable (see KNOWLEDGE.md)
 - `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
 - `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 
@@ -244,3 +250,40 @@ MIT for pi-dev-team · See `NOTICE` for skill licenses (Matt Pocock MIT, Anthrop
 *PRs welcome — keep it thin, keep it tested.*
 
 </div>
+
+⚠ 2 unresolved conflicts detected
+- ours = HEAD
+- theirs = 97e6c8c (feat: add OKF project knowledge bundles and AGENTS.md bootstrap)
+NOTICE: Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` to render a single side). Resolve with `write({ path: "conflict://<N>", content })`, or bulk-resolve every registered conflict with `write({ path: "conflict://*", content })`. Writes replace ONLY the marker block (markers + all sides) — never repeat the lines before/after it; they stay in place.
+`content` shorthand: a line that is exactly `@ours` / `@theirs` / `@base` / `@both` expands to that recorded section. `@both` is ours-then-theirs with no separator — only for additive conflicts where each side adds something different; NEVER for competing edits of the same lines (pick a side or write the combined text). Lines that are not a token pass through verbatim, so `"// keep both\n@ours\n@theirs"` literally writes the comment, then ours, then theirs.
+Per-id bulk: `write({ path: "conflict://*", content: "1: @ours\n2: @theirs\n…" })` resolves each listed id with that side in ONE call — the cheapest way through many pick-one conflicts; unlisted ids stay registered.
+Resolve each block faithfully: keep one side (`@ours`/`@theirs`), or combine them when both intents apply — never invent content beyond the recorded sides, and never stack both sides of competing edits. Resolve several conflicts in a single turn by issuing multiple `write` calls at once; ids stay valid as earlier blocks are resolved.
+
+──── #4  L167-175 ────
+<<< ours
+- `models` — alias per role (OMP `@task` by default, `@slow` for implementors on a fix round; Pi uses session model)
+- `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
+- `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
+>>> theirs
+- `models` — alias per role (OMP `@task` by default; Pi uses session model)
+- `knowledge` — OKF bundle path, bootstrap, enable/disable (see KNOWLEDGE.md)
+- `parallel` / `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune concurrency & budgets
+
+──── #3  L242-246 ────
+<<< ours
+npm test          # unit + e2e harness, no Pi needed
+>>> theirs
+npm test          # 191 tests, no Pi needed
+⚠ 1 unresolved conflict detected
+- ours = HEAD
+- theirs = 97e6c8c (feat: add OKF project knowledge bundles and AGENTS.md bootstrap)
+NOTICE: Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` to render a single side). Resolve with `write({ path: "conflict://<N>", content })`, or bulk-resolve every registered conflict with `write({ path: "conflict://*", content })`. Writes replace ONLY the marker block (markers + all sides) — never repeat the lines before/after it; they stay in place.
+`content` shorthand: a line that is exactly `@ours` / `@theirs` / `@base` / `@both` expands to that recorded section. `@both` is ours-then-theirs with no separator — only for additive conflicts where each side adds something different; NEVER for competing edits of the same lines (pick a side or write the combined text). Lines that are not a token pass through verbatim, so `"// keep both\n@ours\n@theirs"` literally writes the comment, then ours, then theirs.
+Per-id bulk: `write({ path: "conflict://*", content: "1: @ours\n2: @theirs\n…" })` resolves each listed id with that side in ONE call — the cheapest way through many pick-one conflicts; unlisted ids stay registered.
+Resolve each block faithfully: keep one side (`@ours`/`@theirs`), or combine them when both intents apply — never invent content beyond the recorded sides, and never stack both sides of competing edits. Resolve several conflicts in a single turn by issuing multiple `write` calls at once; ids stay valid as earlier blocks are resolved.
+
+──── #5  L237-241 ────
+<<< ours
+npm test          # unit + e2e harness, no Pi needed
+>>> theirs
+npm test          # 191 tests, no Pi needed

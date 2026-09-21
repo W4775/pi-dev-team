@@ -44,6 +44,7 @@ export const WORKFLOW_SKILLS = [
   "code-review",
   "diagnosing-bugs",
   "frontend-design",
+  "project-knowledge",
 ] as const;
 
 export function thisExtensionEntry(): string {
@@ -53,9 +54,9 @@ export function thisExtensionEntry(): string {
 export function workflowSkillsForRole(role: string, opts?: { diagnosing?: boolean }): string[] {
   switch (role) {
     case "planner":
-      return ["grilling", "to-spec", "to-tickets", "codebase-design"];
+      return ["grilling", "to-spec", "to-tickets", "codebase-design", "project-knowledge"];
     case "plan_critic":
-      return ["to-spec", "codebase-design"];
+      return ["to-spec", "codebase-design", "project-knowledge"];
     case "orchestrator":
       return ["to-tickets", "codebase-design"];
     case "designer":
@@ -67,9 +68,9 @@ export function workflowSkillsForRole(role: string, opts?: { diagnosing?: boolea
     case "general":
       return opts?.diagnosing ? ["implement", "tdd", "diagnosing-bugs"] : ["implement", "tdd"];
     case "planner_orchestrator":
-      return ["codebase-design"];
+      return ["codebase-design", "project-knowledge"];
     case "scout":
-      return ["codebase-design"];
+      return ["codebase-design", "project-knowledge"];
     case "reviewer":
       return ["code-review"];
     case "tester":

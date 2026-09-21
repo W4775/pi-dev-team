@@ -73,12 +73,15 @@ export function mapToolsForHost(tools: string[], omp: boolean): string[] {
   return [...new Set(mapped)];
 }
 
-export function toolsForRole(role: IsolatedRole): string[] {
+export function toolsForRole(role: IsolatedRole, opts?: { knowledge?: boolean }): string[] {
   const custom = ["devteam_state", "devteam_handoff"];
   if (role === "design_critic" || role === "frontend" || role === "general") {
     custom.push("devteam_mockup");
   }
-  if (role === "scout") return ["read", "grep", "find", "ls", ...custom];
+  if (role === "scout") {
+    const read = ["read", "grep", "find", "ls", ...custom];
+    return opts?.knowledge ? [...read, "edit", "write"] : read;
+  }
   if (role === "orchestrator" || role === "planner_orchestrator")
     return [...READ_TOOL_NAMES, ...custom];
   if (role === "database" || role === "backend" || role === "frontend" || role === "general") {
@@ -369,7 +372,7 @@ export function childUserPrompt(
   services?: ServiceInfo[],
   assignment?: ChildAssignment,
   maxToolCalls?: number,
-  extras?: { reviewLayer?: string; reviewFiles?: string[] },
+  extras?: { reviewLayer?: string; reviewFiles?: string[]; knowledgeBlock?: string },
 ): string {
   const skillLines = skillDirs
     .filter(Boolean)
@@ -389,6 +392,9 @@ export function childUserPrompt(
           assignment.details ? assignment.details : "",
           assignment.files.length
             ? `Start in these paths (you may read neighbours when a trail leads there):\n${assignment.files.map((file) => `- ${file}`).join("\n")}`
+            : "",
+          extras?.knowledgeBlock
+            ? `${extras.knowledgeBlock}\nPersist sourced facts in the knowledge bundle; keep the handoff summary short.`
             : "",
           `Report facts: existing files, types, endpoints, and patterns. Do not propose work items. Do not write a spec.`,
         ]
@@ -427,6 +433,7 @@ export function childUserPrompt(
     `You are the ${role.replaceAll("_", " ")} for this /devteam run.`,
     `Task: ${task || "(see devteam_state)"}`,
     serviceBlock(role, service, services),
+    extras?.knowledgeBlock && role !== "scout" ? extras.knowledgeBlock : "",
     assigned,
     review,
     `First: call devteam_state with action "get" and sections ${JSON.stringify(stateSectionsForRole(role))} — fetch nothing else. Then read each attached skill's SKILL.md (use the read tool).`,

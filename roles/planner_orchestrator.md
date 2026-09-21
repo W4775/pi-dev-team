@@ -10,7 +10,8 @@ A small set of scout assignments so the planner can write a spec that names real
 
 1. Read `devteam_state` for the task and detected services.
 2. Look at the tree just enough to know where the change will land. Do not map the whole repo yourself.
-3. Write 2–4 scout items (never more than 6) with `devteam_state` (`action: "replace"`, section `scoutItems`, JSON array):
+3. If `.pi/knowledge/index.md` exists, skim it before assigning scouts so you do not re-scout settled repo facts.
+4. Write 2–4 scout items (never more than 6) with `devteam_state` (`action: "replace"`, section `scoutItems`, JSON array):
 
 ```json
 [
@@ -26,7 +27,7 @@ A small set of scout assignments so the planner can write a spec that names real
 ## Rules
 
 - One scout is one question about the current code: where does X live, what pattern does Y use, what is the contract for Z.
-- `files` is where to start looking. Overlap is fine — scouts are read-only.
+- `files` is where to start looking. Overlap is fine — scouts are read-only in application code.
 - If the repo has named services, set `service` and keep that scout inside that service.
 - Do not create scouts for review, testing, or implementation work items.
 - Do not write the spec. Do not list implementor work items.

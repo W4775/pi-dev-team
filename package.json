@@ -20,9 +20,11 @@
     "roles",
     "skills",
     "catalog",
+    "templates",
     "NOTICE",
-    "README.md",
+    "AGENTS.md",
     "WHERE-IS-WORKFLOW-STATE.md",
+    "KNOWLEDGE.md",
     "LICENSE",
     "vendor-licenses"
   ],

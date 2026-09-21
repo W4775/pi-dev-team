@@ -1,3 +1,4 @@
+import { isKnowledgePath } from "./knowledge.ts";
 import { matchAnyGlob } from "./glob.ts";
 import { serviceCommands } from "./services.ts";
 import type {
@@ -62,7 +63,18 @@ export function gateWrite(
   config: ProjectConfig | undefined,
   service?: ServiceInfo,
   assignedPaths?: string[],
+  knowledgeRel?: string,
 ): WriteGate {
+  if (
+    knowledgeRel &&
+    (role === "scout" || role === "planner") &&
+    isKnowledgePath(filePath, cwd, knowledgeRel)
+  ) {
+    if (isDeniedPath(filePath, cwd)) {
+      return { block: true, reason: "Writing secrets or credential files is blocked." };
+    }
+    return { block: false };
+  }
   if (
     !role ||
     role === "planner" ||
@@ -83,8 +95,12 @@ export function gateWrite(
         : role === "planner_orchestrator"
           ? "devteam_state (section scoutItems)"
           : role === "scout"
-            ? "devteam_handoff summary (scout findings)"
-            : "devteam_state (and devteam_mockup for the designer)";
+            ? knowledgeRel
+              ? `devteam_handoff summary and OKF concepts under ${knowledgeRel}/`
+              : "devteam_handoff summary (scout findings)"
+            : role === "planner" && knowledgeRel
+              ? `devteam_state and OKF concepts under ${knowledgeRel}/`
+              : "devteam_state (and devteam_mockup for the designer)";
     return {
       block: true,
       reason: `${role ?? "this role"} cannot edit the repository. Use ${where}.`,
