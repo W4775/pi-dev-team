@@ -777,14 +777,16 @@ export function activeRole(run: RunState): RoleName | undefined {
   ) {
     return run.implementorQueue[run.implementorIndex] ?? run.currentRole;
   }
-  if (run.stage === "planner") return "planner";
+  if (run.stage === "planner" || run.stage === "plan_review") return "planner";
   if (run.stage === "plan_critic") return "plan_critic";
   if (run.stage === "designer") return "designer";
   if (run.stage === "design_critic") return "design_critic";
   if (run.stage === "reviewer") return "reviewer";
   if (run.stage === "tester") return "tester";
   if (run.stage === "linter") return "linter";
-  if (run.stage === "demo") return "demo";
+  if (run.stage === "demo" || run.stage === "demo_opt_in" || run.stage === "demo_review")
+    return run.stage === "demo" ? "demo" : "planner";
+  if (run.stage === "mockup_opt_in" || run.stage === "build_it_pause") return "planner";
   if (run.stage === "commit_message") return "commit_message";
   return run.currentRole;
 }

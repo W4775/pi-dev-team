@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gateBash, gateWrite } from "../src/permissions.ts";
+import {
+  gateBash,
+  gateWrite,
+  isolatedRoleFromFlag,
+  writePathFromInput,
+} from "../src/permissions.ts";
 
 test("non-implementors cannot write the repo", () => {
   for (const role of [
@@ -143,13 +148,45 @@ test("trusted glob config is not required when paths omitted", () => {
   assert.equal(gateWrite("general", join(dir, "src", "a.ts"), dir, undefined).block, false);
 });
 
+test("undefined role fails closed on bash", () => {
+  assert.equal(gateBash(undefined, "ls", undefined).block, true);
+});
 
-test("scout and planner may write inside the knowledge bundle", () => {
-  const rel = ".pi/knowledge";
-  const ok = gateWrite("scout", "/repo/.pi/knowledge/concepts/repo/auth.md", "/repo", undefined, undefined, undefined, rel);
-  const planner = gateWrite("planner", "/repo/.pi/knowledge/concepts/specs/job.md", "/repo", undefined, undefined, undefined, rel);
-  const blocked = gateWrite("scout", "/repo/src/app.ts", "/repo", undefined, undefined, undefined, rel);
-  assert.equal(ok.block, false);
-  assert.equal(planner.block, false);
-  assert.equal(blocked.block, true);
+test("demo cannot write the repo", () => {
+  assert.equal(gateWrite("demo", "/repo/src/app.ts", "/repo", undefined).block, true);
+});
+
+test("read-only bash is per-segment inspect only", () => {
+  assert.equal(gateBash("planner", "git status", undefined).block, false);
+  assert.equal(gateBash("planner", "git push", undefined).block, true);
+  assert.equal(gateBash("planner", "git reset --hard", undefined).block, true);
+  assert.equal(gateBash("reviewer", "git status && rm -rf .", undefined).block, true);
+  assert.equal(gateBash("orchestrator", "ls && curl example.com", undefined).block, true);
+  assert.equal(gateBash("planner", "cd src && git log -1", undefined).block, false);
+});
+
+test("tester does not allow npm install or keyword bypass", () => {
+  assert.equal(gateBash("tester", "npm test", undefined).block, false);
+  assert.equal(gateBash("tester", "npm install lodash", undefined).block, true);
+  assert.equal(gateBash("tester", "echo test", undefined).block, true);
+  assert.equal(gateBash("tester", "npm test && rm -rf dist", undefined).block, true);
+});
+
+test("linter and demo do not allow keyword bypass", () => {
+  assert.equal(gateBash("linter", "ruff check .", undefined).block, false);
+  assert.equal(gateBash("linter", "cat package.json | grep lint", undefined).block, true);
+  assert.equal(gateBash("demo", "npm run dev", undefined).block, false);
+  assert.equal(gateBash("demo", "python -m http.server --start", undefined).block, true);
+});
+
+test("writePathFromInput accepts host field names", () => {
+  assert.equal(writePathFromInput({ path: "src/a.ts" }), "src/a.ts");
+  assert.equal(writePathFromInput({ file_path: "src/b.ts" }), "src/b.ts");
+  assert.equal(writePathFromInput({ filePath: "src/c.ts" }), "src/c.ts");
+  assert.equal(writePathFromInput({}), undefined);
+});
+
+test("isolatedRoleFromFlag includes demo", () => {
+  assert.equal(isolatedRoleFromFlag("demo"), "demo");
+  assert.equal(isolatedRoleFromFlag("planner"), undefined);
 });

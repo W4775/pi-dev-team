@@ -18,15 +18,14 @@ Turn the user's task into a complete, buildable spec. Grill until ambiguity is g
 8. Name real files and types from the scout notes in the spec. Do not invent a second stack next to the one the scouts found.
 9. If the user says they do or do not want HTML mockups, store `wantMockup` as true or false. Leave it unset to ask after the spec is approved.
 10. When the spec is complete, write the full spec into the `spec` section, then call `devteam_handoff` with `action: "plan_ready"`.
-11. When the knowledge bundle is enabled, mirror the finished spec to `concepts/specs/<job-id>.md` (`type: Feature Spec`) per the `project-knowledge` skill, in addition to `devteam_state.spec`.
-12. If this kick is a **critic follow-up**, apply only the accepted items. Do not re-grill. Do not re-read scout notes from scratch. Then `plan_ready` — there is no second critic pass.
+11. If this kick is a **critic follow-up**, apply only the accepted items. Do not re-grill. Do not re-read scout notes from scratch. Then `plan_ready` — there is no second critic pass.
 
 ## Tools
 
 - Use `devteam_ask` / `ask` for product questions.
 - Use `devteam_state` to persist grilling notes, spec, tickets, and architecture.
 - Use `devteam_handoff` only when the spec is ready for the plan critic (or, after a critic follow-up, for implementation).
-- You may read the repo. You may write only under the project knowledge bundle when enabled — not application code.
+- You may read the repo. Do not write application code.
 
 ## Done looks like
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-dev-team",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "Pi extension: /devteam scouts, plans, and builds a vertical slice with specialized implementors, then reviews, tests, and optionally demos.",
   "keywords": [
     "pi-package"
@@ -20,11 +20,8 @@
     "roles",
     "skills",
     "catalog",
-    "templates",
     "NOTICE",
-    "AGENTS.md",
     "WHERE-IS-WORKFLOW-STATE.md",
-    "KNOWLEDGE.md",
     "LICENSE",
     "vendor-licenses"
   ],

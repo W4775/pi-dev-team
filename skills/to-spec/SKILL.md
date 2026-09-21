@@ -75,5 +75,3 @@ A description of the things that are out of scope for this spec.
 Any further notes about the feature.
 
 </spec-template>
-
-When a project knowledge bundle is enabled (see `project-knowledge` skill), mirror the same spec body to `concepts/specs/<job-id>.md` with `type: Feature Spec` frontmatter before `plan_ready`.

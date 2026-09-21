@@ -1,4 +1,3 @@
-import { isKnowledgePath } from "./knowledge.ts";
 import { matchAnyGlob } from "./glob.ts";
 import { serviceCommands } from "./services.ts";
 import type {
@@ -13,11 +12,14 @@ import {
   DEFAULT_LINT_BASH,
   DEFAULT_TEST_BASH,
   IMPLEMENTOR_LAYERS,
+  ISOLATED_ROLES,
 } from "./types.ts";
 
 export const WRITE_TOOLS = new Set(["write", "edit"]);
 
 const DENY_PATHS = [".env", "**/.env", "**/.env.*", "**/*.pem", "**/id_rsa", "**/id_ed25519"];
+
+const WRITE_PATH_KEYS = ["path", "file_path", "filePath", "file"] as const;
 
 export function isImplementorRole(role: RoleName | undefined): role is ImplementorLayer {
   return IMPLEMENTOR_LAYERS.includes(role as ImplementorLayer);
@@ -25,6 +27,17 @@ export function isImplementorRole(role: RoleName | undefined): role is Implement
 
 export function isWriteTool(toolName: string): boolean {
   return WRITE_TOOLS.has(toolName);
+}
+
+/** Path from write/edit tool input — hosts disagree on the field name. */
+export function writePathFromInput(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const rec = input as Record<string, unknown>;
+  for (const key of WRITE_PATH_KEYS) {
+    const value = rec[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
 }
 
 function normalizeRel(filePath: string, cwd: string): string {
@@ -63,18 +76,7 @@ export function gateWrite(
   config: ProjectConfig | undefined,
   service?: ServiceInfo,
   assignedPaths?: string[],
-  knowledgeRel?: string,
 ): WriteGate {
-  if (
-    knowledgeRel &&
-    (role === "scout" || role === "planner") &&
-    isKnowledgePath(filePath, cwd, knowledgeRel)
-  ) {
-    if (isDeniedPath(filePath, cwd)) {
-      return { block: true, reason: "Writing secrets or credential files is blocked." };
-    }
-    return { block: false };
-  }
   if (
     !role ||
     role === "planner" ||
@@ -87,6 +89,7 @@ export function gateWrite(
     role === "reviewer" ||
     role === "tester" ||
     role === "linter" ||
+    role === "demo" ||
     role === "commit_message"
   ) {
     const where =
@@ -95,12 +98,8 @@ export function gateWrite(
         : role === "planner_orchestrator"
           ? "devteam_state (section scoutItems)"
           : role === "scout"
-            ? knowledgeRel
-              ? `devteam_handoff summary and OKF concepts under ${knowledgeRel}/`
-              : "devteam_handoff summary (scout findings)"
-            : role === "planner" && knowledgeRel
-              ? `devteam_state and OKF concepts under ${knowledgeRel}/`
-              : "devteam_state (and devteam_mockup for the designer)";
+            ? "devteam_handoff summary (scout findings)"
+            : "devteam_state (and devteam_mockup for the designer)";
     return {
       block: true,
       reason: `${role ?? "this role"} cannot edit the repository. Use ${where}.`,
@@ -132,17 +131,69 @@ export function gateWrite(
   return { block: false };
 }
 
-function commandMatchesAllowlist(command: string, allow: string[]): boolean {
-  const trimmed = command.trim();
-  return allow.some((entry) => {
-    const e = entry.trim();
-    if (!e) return false;
-    if (trimmed === e) return true;
-    if (trimmed.startsWith(`${e} `)) return true;
-    // allow `cd foo && npm test`
-    const parts = trimmed.split(/&&|\|\||;/).map((p) => p.trim());
-    return parts.some((p) => p === e || p.startsWith(`${e} `));
-  });
+function stripEnvPrefix(command: string): string {
+  return command.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, "").trim();
+}
+
+function commandSegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||;|\n/)
+    .map((part) => stripEnvPrefix(part.trim()))
+    .filter(Boolean);
+}
+
+function isCdOnly(part: string): boolean {
+  return /^cd\s+\S/.test(part);
+}
+
+function entryMatches(part: string, entry: string): boolean {
+  const e = entry.trim();
+  if (!e) return false;
+  return part === e || part.startsWith(`${e} `);
+}
+
+function everySegmentAllowed(
+  command: string,
+  allow: string[],
+  extra?: (part: string) => boolean,
+): boolean {
+  const parts = commandSegments(command);
+  if (!parts.length) return false;
+  return parts.every(
+    (part) => extra?.(part) === true || allow.some((entry) => entryMatches(part, entry)),
+  );
+}
+
+function isInspectSegment(part: string): boolean {
+  if (isCdOnly(part)) return true;
+  if (/^(ls|cat|head|tail|rg|grep|find|wc|file|pwd)\b/.test(part)) return true;
+  return /^git\s+(status|diff|log|show|rev-parse|ls-files|blame|describe)\b/.test(part);
+}
+
+function isTestRunner(part: string): boolean {
+  if (isCdOnly(part)) return true;
+  if (/^(pytest|vitest|jest)\b/.test(part)) return true;
+  if (/^(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/.test(part)) return true;
+  return /^(go\s+test|cargo\s+test|dotnet\s+test)\b/.test(part);
+}
+
+function isLintRunner(part: string): boolean {
+  if (isCdOnly(part)) return true;
+  if (/^(eslint|ruff|clippy|prettier|oxlint|oxfmt)\b/.test(part)) return true;
+  if (/^(npm|pnpm|yarn|bun)\s+run\s+(lint|fmt|format|prettier)\b/.test(part)) return true;
+  return /^(cargo\s+clippy|dotnet\s+format|go\s+vet)\b/.test(part);
+}
+
+function isDemoRunner(part: string): boolean {
+  if (isCdOnly(part)) return true;
+  if (/^(npx\s+)?playwright\b/.test(part)) return true;
+  if (/^xvfb-run\b/.test(part)) return true;
+  return /^(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start)\b/.test(part);
+}
+
+function denyGitCommit(command: string): WriteGate | undefined {
+  if (/\bgit\s+commit\b/.test(command)) return { block: true, reason: "Auto-commit is disabled." };
+  return undefined;
 }
 
 export function gateBash(
@@ -152,20 +203,21 @@ export function gateBash(
   services?: ServiceInfo[],
 ): WriteGate {
   const cmd = command.trim();
-  if (!role) return { block: false };
+  if (!role) {
+    return { block: true, reason: "Bash is blocked until a /devteam role is active." };
+  }
+
+  const commit = denyGitCommit(cmd);
+  if (commit) return commit;
 
   if (role === "commit_message") {
-    const ok =
-      /^(git status|git diff|git log|git rev-parse)\b/.test(cmd) ||
-      commandMatchesAllowlist(cmd, ["git status", "git diff", "git log", "git rev-parse"]);
-    if (!ok)
+    const ok = everySegmentAllowed(cmd, ["git status", "git diff", "git log", "git rev-parse"]);
+    if (!ok) {
       return {
         block: true,
         reason:
           "Commit-message role may only run git status, git diff, git log, and git rev-parse.",
       };
-    if (/\bcommit\b/.test(cmd) && !/^git log\b/.test(cmd)) {
-      return { block: true, reason: "Auto-commit is disabled." };
     }
     return { block: false };
   }
@@ -180,12 +232,9 @@ export function gateBash(
     role === "orchestrator" ||
     role === "reviewer"
   ) {
-    const readOnly =
-      /^(git |ls |cat |head |tail |rg |grep |find |wc |file )/.test(cmd) ||
-      /^(git status|git diff|git log|git rev-parse|ls|pwd)\b/.test(cmd);
-    if (!readOnly)
+    if (!everySegmentAllowed(cmd, [], isInspectSegment)) {
       return { block: true, reason: `${role} may only run read-only inspection commands.` };
-    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
+    }
     return { block: false };
   }
 
@@ -195,16 +244,9 @@ export function gateBash(
       ...(config?.bash?.test ?? []),
       ...serviceCommands(services, "test"),
     ];
-    if (
-      !commandMatchesAllowlist(cmd, allow) &&
-      !/^(cd .+ && )?(npm|pnpm|yarn|pytest|go|cargo|dotnet)\b/.test(cmd)
-    ) {
-      // still allow common test runners even if not exact
-      if (!/\b(test|pytest|vitest|jest)\b/.test(cmd)) {
-        return { block: true, reason: "Tester may only run the agreed test commands." };
-      }
+    if (!everySegmentAllowed(cmd, allow, isTestRunner)) {
+      return { block: true, reason: "Tester may only run the agreed test commands." };
     }
-    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
     return { block: false };
   }
 
@@ -214,31 +256,24 @@ export function gateBash(
       ...(config?.bash?.lint ?? []),
       ...serviceCommands(services, "lint"),
     ];
-    if (
-      !commandMatchesAllowlist(cmd, allow) &&
-      !/\b(lint|eslint|ruff|clippy|prettier|format)\b/.test(cmd)
-    ) {
+    if (!everySegmentAllowed(cmd, allow, isLintRunner)) {
       return { block: true, reason: "Linter may only run lint commands." };
     }
-    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
     return { block: false };
   }
+
   if (role === "demo") {
     const allow = [
       ...DEFAULT_DEMO_BASH,
       ...(config?.bash?.demo ?? []),
       ...serviceCommands(services, "serve"),
     ];
-    if (
-      !commandMatchesAllowlist(cmd, allow) &&
-      !/\b(playwright|headed|xvfb|serve|dev|start)\b/.test(cmd)
-    ) {
+    if (!everySegmentAllowed(cmd, allow, isDemoRunner)) {
       return {
         block: true,
         reason: "Demo may only run the agreed serve command and headed Playwright.",
       };
     }
-    if (/\bgit commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
     return { block: false };
   }
 
@@ -246,26 +281,15 @@ export function gateBash(
     return gateImplementorBash(cmd);
   }
 
-  return { block: false };
+  return { block: true, reason: "Bash is blocked for this role." };
 }
 
-const IMPLEMENTOR_GIT_READ =
-  /^(?:cd\s+.+\s+&&\s+)?git\s+(status|diff|log|show|rev-parse|ls-files|blame|describe)\b/;
-
-function stripEnvPrefix(command: string): string {
-  return command.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, "").trim();
-}
-
-function commandSegments(command: string): string[] {
-  return command
-    .split(/&&|\|\||;|\n/)
-    .map((part) => stripEnvPrefix(part.trim()))
-    .filter(Boolean);
-}
+const IMPLEMENTOR_GIT_READ = /^git\s+(status|diff|log|show|rev-parse|ls-files|blame|describe)\b/;
 
 export function gateImplementorBash(command: string): WriteGate {
   const cmd = command.trim();
-  if (/\bgit\s+commit\b/.test(cmd)) return { block: true, reason: "Auto-commit is disabled." };
+  const commit = denyGitCommit(cmd);
+  if (commit) return commit;
   if (/\b(sudo|doas)\b/.test(cmd)) {
     return { block: true, reason: "Privileged commands are blocked." };
   }
@@ -295,20 +319,7 @@ export function gateImplementorBash(command: string): WriteGate {
 
 export function isolatedRoleFromFlag(value: unknown): IsolatedRole | undefined {
   if (typeof value !== "string") return undefined;
-  const allowed: IsolatedRole[] = [
-    "plan_critic",
-    "design_critic",
-    "planner_orchestrator",
-    "scout",
-    "orchestrator",
-    "database",
-    "backend",
-    "frontend",
-    "general",
-    "reviewer",
-    "tester",
-    "linter",
-    "commit_message",
-  ];
-  return allowed.includes(value as IsolatedRole) ? (value as IsolatedRole) : undefined;
+  return (ISOLATED_ROLES as readonly string[]).includes(value)
+    ? (value as IsolatedRole)
+    : undefined;
 }

@@ -141,12 +141,6 @@ Example: schema and API have disjoint files, so they share a wave; UI lists `dep
 </details>
 
 
-## 📚 Project knowledge (OKF)
-
-Trusted projects can keep **git-tracked OKF spec docs** under `.pi/knowledge/` — scouts write sourced repo facts; the planner mirrors each run's spec to `concepts/specs/<job-id>.md`. Orchestration still lives in `devteam_state`. Bootstrap also adds a minimal root **`AGENTS.md`** in consumer repos. See [KNOWLEDGE.md](./KNOWLEDGE.md) and [AGENTS.md](./AGENTS.md).
-
----
-
 ## ⚙️ Config
 
 Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects only:
@@ -165,7 +159,6 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 - `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
 - `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
 - `models` — alias per role (OMP `@task` by default, `@slow` for implementors on a fix round; Pi uses session model)
-- `knowledge` — OKF bundle path, bootstrap, enable/disable (see KNOWLEDGE.md)
 - `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
 - `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 

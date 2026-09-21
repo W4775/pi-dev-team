@@ -109,8 +109,8 @@ export function compileScoutNotes(items: ScoutItem[] | undefined, existing?: str
     })
     .filter(Boolean)
     .join("\n\n");
-  if (existing?.trim()) return existing.trim();
-  return fromItems;
+  if (fromItems) return fromItems;
+  return existing?.trim() ?? "";
 }
 
 export function retryableScouts(items: ScoutItem[] | undefined): ScoutItem[] {

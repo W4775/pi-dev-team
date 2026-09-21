@@ -44,7 +44,7 @@ test("nextScoutWave waits while any scout is running", () => {
   assert.deepEqual(wave, []);
 });
 
-test("compileScoutNotes prefers stored notes, else item findings", () => {
+test("compileScoutNotes uses item findings, even on retry", () => {
   const items = [
     {
       id: "a",
@@ -56,5 +56,6 @@ test("compileScoutNotes prefers stored notes, else item findings", () => {
     },
   ];
   assert.match(compileScoutNotes(items), /src\/app\/settings/);
-  assert.equal(compileScoutNotes(items, "already written"), "already written");
+  assert.match(compileScoutNotes(items, "already written"), /src\/app\/settings/);
+  assert.equal(compileScoutNotes([], "already written"), "already written");
 });

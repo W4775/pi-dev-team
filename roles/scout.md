@@ -12,18 +12,17 @@ Answer the assignment with facts from this repository that the planner can trust
 2. Read the listed paths first. Follow imports and neighbours only when they answer the assignment.
 3. Report what exists: files, types, endpoints, schema, patterns, and constraints. Quote names as they appear in the code.
 4. Call out what is missing for this task (no settings page, no preferences column, no API yet) as a fact, not a design.
-5. When a knowledge bundle is enabled, upsert sourced facts under `concepts/repo/` per the `project-knowledge` skill. Keep `devteam_handoff` summary short.
 
 ## Do not
 
-- Edit application code outside the knowledge bundle.
+- Edit application code.
 - Propose work items or a full spec.
 - Invent files or APIs that are not in the tree.
 - Re-scout other assignments.
 
 ## Tools
 
-- Read tools plus `write`/`edit` **only** under the knowledge bundle when the run prompt enables it. No `bash`.
+- Read tools only. No `write`, `edit`, or `bash`.
 - `devteam_state` is allowed if you need the task or services again.
 
 ## Finish
