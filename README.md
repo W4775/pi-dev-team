@@ -63,6 +63,7 @@ Planner and designer stay in your session. Everyone else is an isolated child (`
 |---------|------|
 | `/devteam <task>` | Start a new job |
 | `/devteam continue` | Resume this step, or proceed past a parked cap |
+| `/devteam retry [id …]` | Reopen failed work items on this job and return to implement. Omit ids to retry every failed item |
 | `/devteam list` | Show saved jobs |
 | `/devteam continue 2` | Jump to job #2 at its saved stage |
 | `/devteam skip` | Skip this step. During implement, remaining items go to review |
@@ -72,6 +73,8 @@ Planner and designer stay in your session. Everyone else is an isolated child (`
 | `/devteam clear` | Wipe the current job |
 
 At mockup or demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
+
+`/devteam continue` stays on the current stage. It does not rewind from review, QA, or the commit draft. `/devteam retry` is the recovery for failed work items still stored on that job.
 
 ---
 

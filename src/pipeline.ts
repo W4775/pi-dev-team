@@ -597,6 +597,9 @@ export function continueHint(run: RunState): string {
   if (run.stage === "demo_review") {
     return "Accept the demo, or request changes to loop back to the planner (max 2 demos).";
   }
+  if (run.stage !== "implement" && failedItems(run.workItems).length) {
+    return `Failed work items are still in this job. /devteam retry reopens them; /devteam continue stays on ${run.stage}.`;
+  }
   return `Nothing to continue at stage ${run.stage}. Try /devteam status.`;
 }
 
@@ -708,6 +711,85 @@ export function applyContinue(run: RunState): RunState {
   }
 
   return current === run ? run : current;
+}
+
+export type ReopenResult = { ok: true; run: RunState } | { ok: false; error: string };
+
+/**
+ * Send selected failed work items back to implement on the same job.
+ * Omitting ids retries every failed item. Attempts are kept; the automatic
+ * retry cap does not block this command.
+ */
+export function reopenImplementation(run: RunState, itemIds?: string[]): ReopenResult {
+  if (run.pipelineLocked) {
+    return { ok: false, error: "devteam is busy. /devteam stop to abort this step." };
+  }
+  const items = run.workItems ?? [];
+  if (items.some((item) => item.status === "running")) {
+    return {
+      ok: false,
+      error: "A work item is still running. /devteam stop to abort this step.",
+    };
+  }
+
+  const requested = (itemIds ?? []).map((id) => id.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const duplicates: string[] = [];
+  for (const id of requested) {
+    if (seen.has(id)) duplicates.push(id);
+    seen.add(id);
+  }
+  if (duplicates.length) {
+    return {
+      ok: false,
+      error: `Duplicate work item id: ${[...new Set(duplicates)].join(", ")}.`,
+    };
+  }
+
+  const byId = new Map(items.map((item) => [item.id, item]));
+  if (requested.length) {
+    const unknown = requested.filter((id) => !byId.has(id));
+    if (unknown.length) {
+      return { ok: false, error: `Unknown work item: ${unknown.join(", ")}.` };
+    }
+    const notFailed = requested.filter((id) => byId.get(id)?.status !== "failed");
+    if (notFailed.length) {
+      const detail = notFailed.map((id) => `${id} is ${byId.get(id)?.status}`).join(", ");
+      return { ok: false, error: `${detail}. /devteam retry only reopens failed items.` };
+    }
+  }
+
+  const selected = new Set(
+    requested.length
+      ? requested
+      : items.filter((item) => item.status === "failed").map((item) => item.id),
+  );
+  if (!selected.size) return { ok: false, error: "No failed work items to retry." };
+
+  const workItems = items.map((item) =>
+    selected.has(item.id) ? { ...item, status: "pending" as const, error: undefined } : item,
+  );
+  const queue = neededImplementors({ ...run, workItems });
+  return {
+    ok: true,
+    run: goToStage(
+      stamp(run, {
+        workItems,
+        lastError: undefined,
+        pendingHandoff: undefined,
+        halted: false,
+        currentStatus: undefined,
+      }),
+      "implement",
+      {
+        implementorQueue: queue.length ? queue : ["general"],
+        implementorIndex: 0,
+        currentRole: queue[0] ?? "general",
+        pauseReason: undefined,
+        pipelineLocked: false,
+      },
+    ),
+  };
 }
 
 export function acceptMockupChoice(run: RunState, want: boolean): RunState {

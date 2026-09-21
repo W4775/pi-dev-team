@@ -30,12 +30,61 @@ import {
   startSequentialImplementation,
   taskNamesAFile,
   workItemsFromPlan,
+  reopenImplementation,
 } from "../src/pipeline.ts";
-import { MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS } from "../src/types.ts";
-import type { RunState } from "../src/types.ts";
+import { nextWave } from "../src/work.ts";
+import { MAX_DESIGN_REJECTS, MAX_FIX_ROUNDS, MAX_WORK_ITEM_ATTEMPTS } from "../src/types.ts";
+import type { RunState, WorkItem } from "../src/types.ts";
 
 function run(partial: Partial<RunState>): RunState {
   return { ...emptyRun("s", "task"), ...partial };
+}
+
+function workItem(partial: Pick<WorkItem, "id" | "status"> & Partial<WorkItem>): WorkItem {
+  return {
+    layer: "backend",
+    title: partial.id,
+    files: [`src/${partial.id}.ts`],
+    dependsOn: [],
+    attempts: 0,
+    ...partial,
+  };
+}
+
+function commitWithFailures(): RunState {
+  return run({
+    jobId: "job-1",
+    spec: "Ship settings",
+    backendNotes: "API notes",
+    frontendNotes: "UI notes",
+    stage: "commit_message",
+    currentRole: "commit_message",
+    pipelineLocked: false,
+    commitMessageDraft: "feat: settings",
+    workItems: [
+      workItem({
+        id: "W1",
+        status: "failed",
+        attempts: 1,
+        error: "exited 1",
+        files: ["src/w1.ts"],
+      }),
+      workItem({
+        id: "W2",
+        status: "failed",
+        attempts: 0,
+        error: "exited 1",
+        files: ["src/w2.ts"],
+      }),
+      workItem({
+        id: "W3",
+        status: "pending",
+        layer: "frontend",
+        files: ["src/w3.tsx"],
+        dependsOn: ["W1", "W2"],
+      }),
+    ],
+  });
 }
 
 test("shouldOfferMockup only for frontend + web", () => {
@@ -909,6 +958,155 @@ test("continue retries failed work items; skip sends them to review", () => {
     workItems: failed.workItems?.map((item) => ({ ...item, attempts: 2 })),
   });
   assert.equal(exhausted.stage, "reviewer");
+});
+
+test("retry one failed item from commit_message", () => {
+  const source = commitWithFailures();
+  const result = reopenImplementation(source, ["W1"]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.run.stage, "implement");
+  assert.equal(result.run.currentRole, "backend");
+  assert.equal(result.run.pipelineLocked, false);
+  assert.equal(result.run.workItems?.[0]?.status, "pending");
+  assert.equal(result.run.workItems?.[0]?.error, undefined);
+  assert.equal(result.run.workItems?.[0]?.attempts, 1);
+  assert.equal(result.run.workItems?.[1]?.status, "failed");
+  assert.equal(result.run.workItems?.[2]?.status, "pending");
+  assert.equal(source.stage, "commit_message");
+  assert.equal(source.workItems?.[0]?.status, "failed");
+  assert.equal(phaseOf(result.run), "spawn_work");
+});
+
+test("retry selected failed items from commit_message", () => {
+  const result = reopenImplementation(commitWithFailures(), ["W1", "W2"]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.run.stage, "implement");
+  assert.equal(result.run.workItems?.[0]?.status, "pending");
+  assert.equal(result.run.workItems?.[1]?.status, "pending");
+  assert.equal(result.run.workItems?.[1]?.error, undefined);
+  assert.equal(result.run.workItems?.[2]?.dependsOn.join(","), "W1,W2");
+});
+
+test("retry with no ids reopens every failed item and keeps the job", () => {
+  const source = commitWithFailures();
+  const result = reopenImplementation(source);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const next = result.run;
+  assert.equal(next.jobId, "job-1");
+  assert.equal(next.spec, "Ship settings");
+  assert.equal(next.backendNotes, "API notes");
+  assert.equal(next.frontendNotes, "UI notes");
+  assert.equal(next.commitMessageDraft, "feat: settings");
+  assert.deepEqual(
+    next.workItems?.map((item) => [item.id, item.status, item.attempts]),
+    [
+      ["W1", "pending", 1],
+      ["W2", "pending", 0],
+      ["W3", "pending", 0],
+    ],
+  );
+  assert.equal(next.workItems?.[0]?.error, undefined);
+  assert.equal(next.workItems?.[1]?.error, undefined);
+});
+
+test("retried dependencies keep a pending dependent out of the wave until they are done", () => {
+  const result = reopenImplementation(commitWithFailures(), ["W1", "W2"]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    nextWave(result.run.workItems).map((item) => item.id),
+    ["W1", "W2"],
+  );
+  const done = result.run.workItems?.map((item) =>
+    item.id === "W1" || item.id === "W2" ? { ...item, status: "done" as const } : item,
+  );
+  assert.deepEqual(
+    nextWave(done).map((item) => item.id),
+    ["W3"],
+  );
+});
+
+test("retry rejects unknown, non-failed, and duplicate ids", () => {
+  const source = commitWithFailures();
+  const unknown = reopenImplementation(source, ["W9"]);
+  assert.equal(unknown.ok, false);
+  if (unknown.ok) return;
+  assert.match(unknown.error, /Unknown work item: W9/);
+
+  const pending = reopenImplementation(source, ["W3"]);
+  assert.equal(pending.ok, false);
+  if (pending.ok) return;
+  assert.match(pending.error, /W3 is pending/);
+
+  const mixed = reopenImplementation(source, ["W1", "W3"]);
+  assert.equal(mixed.ok, false);
+  if (mixed.ok) return;
+  assert.match(mixed.error, /W3 is pending/);
+
+  const duplicate = reopenImplementation(source, ["W1", "W1"]);
+  assert.equal(duplicate.ok, false);
+  if (duplicate.ok) return;
+  assert.match(duplicate.error, /Duplicate work item id: W1/);
+
+  assert.equal(source.stage, "commit_message");
+  assert.equal(source.workItems?.[0]?.status, "failed");
+});
+
+test("retry refuses to change a locked or running pipeline", () => {
+  const locked = commitWithFailures();
+  locked.pipelineLocked = true;
+  const busy = reopenImplementation(locked, ["W1"]);
+  assert.equal(busy.ok, false);
+  if (busy.ok) return;
+  assert.match(busy.error, /busy/);
+  assert.equal(locked.stage, "commit_message");
+  assert.equal(locked.workItems?.[0]?.status, "failed");
+
+  const running = commitWithFailures();
+  running.workItems = running.workItems?.map((item) =>
+    item.id === "W1" ? { ...item, status: "running" as const } : item,
+  );
+  const active = reopenImplementation(running, ["W2"]);
+  assert.equal(active.ok, false);
+  if (active.ok) return;
+  assert.match(active.error, /still running/);
+  assert.equal(running.stage, "commit_message");
+});
+
+test("explicit retry works after the automatic attempt cap", () => {
+  const source = commitWithFailures();
+  source.workItems = source.workItems?.map((item) =>
+    item.id === "W1" ? { ...item, attempts: MAX_WORK_ITEM_ATTEMPTS, error: "exited 1" } : item,
+  );
+  const result = reopenImplementation(source, ["W1"]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.run.stage, "implement");
+  assert.equal(result.run.workItems?.[0]?.status, "pending");
+  assert.equal(result.run.workItems?.[0]?.attempts, MAX_WORK_ITEM_ATTEMPTS);
+  assert.equal(result.run.workItems?.[0]?.error, undefined);
+});
+
+test("continue at commit_message does not reopen failed work items", () => {
+  const source = commitWithFailures();
+  const next = applyContinue(source);
+  assert.equal(next.stage, "commit_message");
+  assert.equal(next.currentRole, "commit_message");
+  assert.equal(next.jobId, source.jobId);
+  assert.deepEqual(
+    next.workItems?.map((item) => [item.id, item.status, item.attempts, item.error]),
+    source.workItems?.map((item) => [item.id, item.status, item.attempts, item.error]),
+  );
+});
+
+test("retry with nothing failed explains that", () => {
+  const result = reopenImplementation(run({ stage: "commit_message", workItems: [] }));
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /No failed work items/);
 });
 
 test("inferHandoffAction recovers critic, implementor, QA, and orchestrator exits", () => {

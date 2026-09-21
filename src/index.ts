@@ -38,6 +38,7 @@ import {
   activeRole,
   applyContinue,
   applyCritiqueDecisions,
+  reopenImplementation,
   applyDemoReview,
   applySkip,
   applyStop,
@@ -1202,7 +1203,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Run the /devteam workflow: scout, plan, build a vertical slice with specialists, review once, test, optional demo",
     getArgumentCompletions: (prefix: string) => {
-      const items = ["continue", "list", "status", "stop", "clear", "mockup", "skip"].map(
+      const items = ["continue", "list", "status", "stop", "clear", "mockup", "skip", "retry"].map(
         (value) => ({
           value,
           label: value,
@@ -1227,7 +1228,7 @@ export default function (pi: ExtensionAPI) {
             ctx,
             run && run.stage !== "idle"
               ? `devteam is at ${run.stage}. Try /devteam status.`
-              : "Usage: /devteam <task> | continue | list | status | mockup | skip | stop | clear",
+              : "Usage: /devteam <task> | continue | retry | list | status | mockup | skip | stop | clear",
           );
           return;
         }
@@ -1331,6 +1332,31 @@ export default function (pi: ExtensionAPI) {
           persist(next);
           notify(ctx, `Continuing: ${run.stage} → ${next.stage}.`);
           await advancePipeline(ctx, next);
+          return;
+        }
+
+        if (sub === "retry") {
+          if (!run || run.stage === "idle") {
+            notify(ctx, "No /devteam run to retry.", "warning");
+            return;
+          }
+          if (run.pipelineLocked || advancing) {
+            notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
+            return;
+          }
+          const ids = restText ? restText.split(/\s+/).filter(Boolean) : undefined;
+          const reopened = reopenImplementation(run, ids);
+          if (!reopened.ok) {
+            notify(ctx, reopened.error, "warning");
+            return;
+          }
+          persist(reopened.run);
+          const retried = (
+            ids ??
+            (run.workItems ?? []).filter((item) => item.status === "failed").map((item) => item.id)
+          ).join(" ");
+          notify(ctx, `Retrying ${retried}. ${run.stage} → implement.`);
+          await advancePipeline(ctx, reopened.run);
           return;
         }
 
