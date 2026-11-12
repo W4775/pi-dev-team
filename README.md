@@ -72,19 +72,20 @@ Planner and designer stay in your session. Everyone else is an isolated child (`
 | `/devteam mockup` | Open the HTML mockup |
 | `/devteam clear` | Clear current job state and its job artifact directory |
 
-At mockup or demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
+At mockup or demo opt-in, answer **yes** or **no** in chat, or skip. `/devteam continue` resumes the current stage; `/devteam retry` reopens failed work.
 
-Before clearing, back up any needed artifacts: clear removes the job's artifact directory recursively, including mockups, demo scripts, and screenshots.
+Before clearing, back up needed artifacts: `/devteam clear` removes the job's artifact directory, including mockups, demo scripts, and screenshots.
 
-On POSIX, stopping a child sends SIGTERM to its process group and escalates to SIGKILL after two seconds. On Windows, termination covers the direct child only.
+<details>
+<summary>Troubleshooting and recovery</summary>
 
-`/devteam continue` stays on the current stage. It does not rewind from review, QA, or the commit draft. `/devteam retry` is the recovery for failed work items still stored on that job.
+- Review, test, lint, and design-critic caps park the job; continue or skip to proceed. Failed scouts retry automatically up to their cap, then park. Use `/devteam continue` to retry or `/devteam skip` to proceed without scouting.
+- Plan critique requires an interactive decision. Without a picker, resume with UI or skip to keep the existing spec.
+- On Windows, stopping a child terminates only the direct child; descendants may need manual cleanup.
+- If a crash leaves a state `.lock` directory behind, stop all devteam processes before removing it. Lock timeouts fail closed to protect run state.
+- If a run remains busy after a crash, stop all parent and child processes for that job. Back up its canonical run JSON (shown by `/devteam status`, not the workflow-state alias), remove `pipelineOwner`, set `pipelineLocked` to `false`, and use `/devteam continue <job-id>` to requeue interrupted items. Never clear ownership while any job process is alive.
 
-Failed scouts retry automatically up to their cap; exhausted or interrupted work stays parked instead of advancing without research. Use `/devteam continue` to retry or `/devteam skip` to proceed without it. Plan critique requires an interactive decision; without a picker, resume with UI or skip to keep the existing spec.
-
-If a crash leaves a state `.lock` directory behind, stop all devteam processes before removing that directory. Lock timeouts fail closed to protect run state.
-
-If a run remains busy after a crash, stop all parent and child processes for that job and back up its canonical run JSON (shown by `/devteam status`, not the workflow-state alias). Remove `pipelineOwner`, set `pipelineLocked` to `false`, and use `/devteam continue <job-id>` to requeue interrupted items. Do not clear ownership while any job process is alive.
+</details>
 
 ---
 
