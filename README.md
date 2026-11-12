@@ -10,7 +10,6 @@ Plans with scouts · Builds the slice · Tests + lints · Optional live demo
 [![Oh My Pi](https://img.shields.io/badge/Compatible-OMP-0a0a0a?style=flat-square)](https://github.com/coder/oh-my-pi)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square)](#tests)
 
 [Quick Start](#-quick-start) · [How it Works](#-how-it-works) · [Commands](#-commands) · [Config](#-config) · [Stack Skills](#-stack-skills)
 
@@ -33,27 +32,23 @@ Then in any Pi/OMP session:
 /devteam Add a settings page for profile and notifications
 ```
 
-Answer the planner's picker → review the critic → watch specialists build the slice → one review, then tests. Done.
+Answer the planner's questions, review its suggestions, and let specialists implement and check the work.
 
-> Previous jobs persist. `/devteam list` to resume. Each session owns its own run.
+> Jobs persist between sessions. Use `/devteam list` to find a previous job.
 
 ---
 
 ## 🧠 How it Works
 
-**Scout → Plan → Build the slice → Prove once.**
-
-| Step | What happens | Who |
-|------|--------------|-----|
-| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo. For non-multi-service projects, a named file or source path skips scouting; otherwise `@tiny` may decide to skip. Multi-service projects always scout | children |
-| **Plan** | Planner grills you (picker), writes spec; critic may pause for Accept / Reject | you + child |
-| **Design** | After the spec is approved, web+frontend jobs **ask** unless `wantMockup` was already set | you |
-| **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items — **skipped** when there is one layer, or every needed layer already has `filesToChange`. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
-| **Prove** | Reviewer on the **whole slice**, then tester, then linter. Pass/fail comes from **exit codes**, `[block]` findings, and (when those miss) `@tiny`. Each parks after 3 failed fix rounds until `/devteam continue`. Environment/transient bash failures park instead of sending implementors. Reviewer and fixer implementors use `@slow` | children |
-| **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Best-effort headed Playwright, then you accept or request changes (max 2 demos) | you + child |
-| **Ship** | Drafts a conventional commit — *never commits* | child |
-
-Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo` on trusted projects, with `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` for the commit draft). For unassigned children without a handoff, completion is inferred from the notebook first, then `@tiny`; if both miss, the job stops. Assigned implementors must mark their item done with `implementor_done`; assigned scouts need saved findings. Assigned items do not use that inference fallback.
+| Step | What happens |
+|------|--------------|
+| **Research** | Scouts explore the project when needed. |
+| **Plan** | A planner asks questions and writes a spec; a critic checks it for gaps. |
+| **Design** | Optionally review a mockup for a web interface. |
+| **Build** | Specialists implement the work, running independent tasks in parallel when possible. |
+| **Review and test** | A reviewer checks the changes, then the team runs tests and linting. Issues can trigger fixes and another check. |
+| **Demo** | Optionally watch a Playwright demo and request changes. |
+| **Finish** | A commit message is drafted for you. The plugin never commits automatically. |
 
 ---
 
@@ -85,82 +80,15 @@ Before clearing, back up needed artifacts: `/devteam clear` removes the job's ar
 - If a crash leaves a state `.lock` directory behind, stop all devteam processes before removing it. Lock timeouts fail closed to protect run state.
 - If a run remains busy after a crash, stop all parent and child processes for that job. Back up its canonical run JSON (shown by `/devteam status`, not the workflow-state alias), remove `pipelineOwner`, set `pipelineLocked` to `false`, and use `/devteam continue <job-id>` to requeue interrupted items. Never clear ownership while any job process is alive.
 
+See [Where is workflow state?](WHERE-IS-WORKFLOW-STATE.md) for job files and artifacts.
+
 </details>
 
 ---
 
-## 🔄 Pipeline
+## 🎬 Demo
 
-```mermaid
-flowchart TD
-    A["/devteam task"] --> SK{multi-service?}
-    SK -->|yes| SO[Scout orchestrator]
-    SK -->|no| SF{file/path named or @tiny skips?}
-    SF -->|yes| P
-    SF -->|no| SO
-    SO --> SC[Scouts · parallel]
-    SC --> P[Planner · picker]
-    P --> C[Plan critic]
-    C -->|revise| PR[Plan review]
-    PR -->|accepted items| RE[Planner revises spec]
-    RE --> MU
-    PR -->|keep spec| MU
-    C -->|approve| MU{web frontend mockup?}
-    MU -->|unset · ask| MO[Mockup opt-in]
-    MO -->|yes| DS[Designer]
-    MO -->|no| BI
-    MU -->|already yes| DS
-    DS --> DC[Design critic]
-    DC -->|revise| DS
-    DC -->|approve| BI
-    MU -->|no| BI{orchestrator needed?}
-    BI -->|one layer or files known| B[Specialists · waves]
-    BI -->|else| O[Orchestrator]
-    O --> B
-    B --> R[Reviewer · whole slice]
-    R -->|blocks| FX[Fix matching specialists]
-    FX --> R
-    R -->|pass or cap| T[Tester]
-    T -->|fail| TF[Fix]
-    TF --> T
-    T -->|pass or cap| L[Linter]
-    L -->|fail| LF[Fix]
-    LF --> L
-    L -->|pass or cap| Q{web frontend demo?}
-    Q -->|unset · ask| DO[Demo opt-in]
-    DO -->|yes| DM[Demo · Playwright]
-    DO -->|no| CM[Commit draft]
-    Q -->|already yes| DM
-    DM --> DR[Demo review]
-    DR -->|changes · max 2| P
-    DR -->|accept| CM
-    Q -->|no| CM
-```
-
-Design, review, test, and lint **park after their cap** (2 design rejects, 3 fix rounds). `/devteam continue` proceeds (design → implement, review → tester, test → lint, lint → demo or commit). `/devteam skip` does the same at those caps.
-
-Demo is best-effort: the service needs an agreed serve command, plus project-local Playwright and its browser already installed. On Linux without a display, the demo role uses `xvfb-run` if available; a virtual display is not visible on the user's screen. Missing prerequisites or a failed demo are recorded as notes, not pipeline failures.
-
-<details>
-<summary>Inside the build: specialists, not a layer factory</summary>
-
-```mermaid
-flowchart LR
-    O[Orchestrator] --> W1["wave 1: database + backend"]
-    W1 -->|UI dependsOn API| W2["wave 2: frontend"]
-    W2 --> R[Reviewer · whole slice]
-    R --> T[Tester]
-    T --> L[Linter]
-```
-
-Example: schema and API have disjoint files, so they share a wave; UI lists `dependsOn` the API item, so it waits. If all three are disjoint and have no `dependsOn`, they run in one wave (up to `parallel`, default 3, cap 6).
-
-- `layer` on an item only picks the specialist (`database` / `backend` / `frontend` / `general`) and its write globs.
-- Disjoint file lists run in the same wave, including across layers.
-- `dependsOn` is the only ordering (migration before route, route before UI).
-- No `workItems`? Needed specialists run in sequence, then the same single review.
-
-</details>
+The demo needs a configured serve command, project-local Playwright, and an installed browser. It is best-effort: missing prerequisites or a failed demo are recorded as notes. On Linux without a display, `xvfb-run` can provide a virtual display, but it is not visible on your screen.
 
 
 ## ⚙️ Config
@@ -178,22 +106,18 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 }
 ```
 
-- `skills` — catalog IDs from `catalog/stacks.json` (3 per child max, sparse-cloned)
-- `services` — auto-detected via `go.mod`/`package.json`/`.csproj`; override when guess wrong
-- `models` — alias per role (OMP: `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` commit message; Pi uses session model)
-- `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
-- `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
+- `skills` — stack skills for each kind of work; see `catalog/stacks.json` for available IDs.
+- `services` — override detected services and their commands.
+- `models` — choose a model for each role. Pi uses the session model.
+- `parallel` — maximum number of independent specialists running at once (default 3, maximum 6).
+- `maxToolCalls`, `childIdle`, `repeatToolAbort` — adjust agent limits.
 
 
 ---
 
 ## 🧩 Stack Skills
 
-Bundled: `implement` + `tdd`. Plus official stacks (React, Vue, Angular, React Native, .NET, Blazor, Postgres, EF Core…) — not vendored, fetched on demand.
-
-Progress: one-line widget `step · role · 1:23` + 40-line transcript blocks per role.
-
-Default tool-call budgets: `200` for database/backend/frontend/general implementors, reviewer, tester, linter, and demo; `40` for scouts; `80` for other isolated roles. `childIdle` defaults to `480s`, `repeatToolAbort` to `8`.
+The plugin includes development workflow skills and can use stack-specific skills for React, Vue, Angular, .NET, Postgres, and more. Stack skills are fetched when needed.
 
 ---
 
@@ -201,53 +125,28 @@ Default tool-call budgets: `200` for database/backend/frontend/general implement
 
 | Role | Can |
 |------|-----|
-| Planner / Critics / Reviewer | Read-only |
-| Designer | Planner's read, search, bash, ask, state and handoff tools, plus `devteam_mockup`; no repository edits |
-| Implementors | Edit tree, no `.env`/keys, no `git commit`, no `rm -rf` / git rewrite / package installs / curl / sudo |
-| Demo | `serve` + Playwright, writes `demo/` only |
+| Planner / critics / reviewer | Read project files; do not edit application code |
+| Designer | Read files and create mockups; do not edit application code |
+| Implementors | Edit project files; restricted from secrets, commits, destructive Git operations, and package installs |
+| Demo | Run the configured app and Playwright; write demo artifacts |
 
 Optional per-layer `paths` globs further restrict writes.
 
 These checks are guardrails, not a security sandbox: shell commands and project scripts can perform actions beyond the tool-level restrictions. Run only trusted projects and agents with appropriate OS permissions.
 
-Trust is host-provided: if the trust API is unavailable or throws (including on hosts without it), the extension assumes trusted. OMP children may then run with `--yolo`; use only trusted projects.
+Use only trusted projects. On hosts without a working trust API, including OMP, the extension assumes the project is trusted and may launch children with `--yolo`.
 
 
 ---
 
-## 📦 Install Details
+<details>
+<summary>Installation and development details</summary>
 
-**Pi** — Node 22+:
+Install a local checkout with `omp plugin install /abs/path/to/pi-dev-team`, or load it in Pi with `pi -e ./src/index.ts`. Upgrade OMP with `omp plugin uninstall pi-dev-team` followed by the install command above.
 
-```bash
-pi -e ./src/index.ts          # dev
-pi install https://github.com/W4775/pi-dev-team
-```
+To verify a checkout, run `npm test`, `npm run lint`, and `npm run fmt:check`. Development tooling requires Node `^22.18.0 || ^24.11.0 || >=26.0.0`; the extension supports Node 22+.
 
-**OMP** — don't `omp plugin link` a checkout with nested `.git` on older OMP:
-
-```bash
-omp plugin install github:W4775/pi-dev-team
-omp plugin install /abs/path/to/pi-dev-team  # from clone
-```
-
-Upgrade: `omp plugin uninstall pi-dev-team && omp plugin install github:W4775/pi-dev-team`
-
-OMP children use `PI_SUBPROCESS_CMD` / `omp --yolo` + `DEVTEAM_ROLE`.
-
----
-
-## ✅ Tests
-
-Development tooling requires Node `^22.18.0 || ^24.11.0 || >=26.0.0` for Vite+. The extension itself supports Node 22+.
-
-```bash
-npm test          # unit + e2e harness, no Pi needed
-npm run lint      # Vite+ lint (Oxlint)
-npm run fmt:check # Vite+ format check (fix: npm run fmt)
-```
-
-Covers: permissions, per-session state, teardown, slice waves, review-once, fail-closed handoffs, block vs note, stack detection, model tiers, transcript caps.
+</details>
 
 ---
 
