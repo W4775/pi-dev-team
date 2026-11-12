@@ -101,16 +101,11 @@ export function findScout(
 }
 
 export function compileScoutNotes(items: ScoutItem[] | undefined, existing?: string): string {
-  const fromItems = (items ?? [])
-    .map((item) => {
-      const body = item.findings?.trim() || item.error || "";
-      if (!body && item.status !== "done") return "";
-      return `### ${item.title} (${item.id})\n${body || "(no findings stored)"}`;
-    })
-    .filter(Boolean)
+  if (!items?.length) return existing?.trim() ?? "";
+  return items
+    .filter((item) => item.status === "done" && item.findings?.trim())
+    .map((item) => `### ${item.title} (${item.id})\n${item.findings!.trim()}`)
     .join("\n\n");
-  if (fromItems) return fromItems;
-  return existing?.trim() ?? "";
 }
 
 export function retryableScouts(items: ScoutItem[] | undefined): ScoutItem[] {

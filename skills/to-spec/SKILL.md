@@ -54,7 +54,7 @@ A list of implementation decisions that were made. This can include:
 - API contracts
 - Specific interactions
 
-Do NOT include specific file paths or code snippets. They may end up being outdated very quickly.
+Name relevant existing files and types from repo exploration or scout notes, and expected new files where known, so the orchestrator can assign work and write allowlists. Avoid code snippets unless they encode a decision more precisely than prose.
 
 Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts, not a working demo, just the important bits.
 

@@ -188,6 +188,8 @@ export type RunState = {
   /** User stopped this step. The pipeline must not auto-advance until continue or skip. */
   halted?: boolean;
   pipelineLocked: boolean;
+  /** Identifies an orchestrator until all of its children have finished. */
+  pipelineOwner?: string;
   currentRole?: RoleName;
   interactiveRole?: InteractiveRole;
   implementorQueue: ImplementorLayer[];

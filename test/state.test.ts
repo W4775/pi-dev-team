@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  utimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
+import { withStateLock } from "../src/lock.ts";
 import {
   clearRunFiles,
   classifyFindingLine,
@@ -28,6 +41,125 @@ import {
   resolveMockupRel,
 } from "../src/tools.ts";
 
+test("state lock times out without running callback or removing another owner", () => {
+  const dir = mkdtempSync(join(tmpdir(), "state-lock-"));
+  const path = join(dir, "run.json");
+  const lock = `${path}.lock`;
+  mkdirSync(lock);
+  utimesSync(lock, new Date(0), new Date(0));
+  let now = 0;
+  const clock = mock.method(Date, "now", () => (now += 10_000));
+  let called = false;
+  try {
+    assert.throws(
+      () =>
+        withStateLock(path, () => {
+          called = true;
+        }),
+      /Timed out acquiring state lock/,
+    );
+    assert.equal(called, false);
+    assert.equal(existsSync(lock), true);
+  } finally {
+    clock.mock.restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("state lock leaves a replacement owner's lock intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "state-lock-"));
+  const path = join(dir, "run.json");
+  const lock = `${path}.lock`;
+  try {
+    withStateLock(path, () => {
+      renameSync(lock, `${lock}.old`);
+      mkdirSync(lock);
+    });
+    assert.equal(existsSync(lock), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveRun replaces snapshots atomically", () => {
+  const dir = mkdtempSync(join(tmpdir(), "state-atomic-"));
+  const path = join(dir, "run.json");
+  try {
+    saveRun(path, emptyRun("session", "old"));
+    const oldSnapshot = openSync(path, "r");
+    try {
+      saveRun(path, emptyRun("session", "new"));
+      assert.equal(JSON.parse(readFileSync(oldSnapshot, "utf8")).task, "old");
+      assert.equal(loadRun(path)?.task, "new");
+    } finally {
+      closeSync(oldSnapshot);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent processes preserve all mutations and publish coherent aliases", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "state-concurrent-"));
+  const path = runPaths(dir, "job").json;
+  saveRun(path, emptyRun("session", "task", "job"), dir);
+  const module = new URL("../src/state.ts", import.meta.url).href;
+  const script = `
+    import { mutateRun } from ${JSON.stringify(module)};
+    for (let i = 0; i < 20; i++) {
+      mutateRun(process.argv[1], process.argv[2], run => ({
+        ...run, spec: (run.spec || "") + "x"
+      }));
+    }
+  `;
+  try {
+    await Promise.all(
+      Array.from(
+        { length: 4 },
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const child = spawn(
+              process.execPath,
+              ["--experimental-strip-types", "--input-type=module", "-e", script, path, dir],
+              { stdio: "inherit" },
+            );
+            child.on("error", reject);
+            child.on("exit", (code) =>
+              code === 0 ? resolve() : reject(new Error(`child exited ${code}`)),
+            );
+          }),
+      ),
+    );
+    assert.equal(loadRun(path)?.spec?.length, 80);
+    assert.deepEqual(JSON.parse(readFileSync(workflowStatePaths(dir).json, "utf8")), loadRun(path));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mutation refuses corrupt canonical state and recovers after publication failure", () => {
+  const dir = mkdtempSync(join(tmpdir(), "state-recovery-"));
+  const path = runPaths(dir, "job").json;
+  const aliases = workflowStatePaths(dir);
+  try {
+    saveRun(path, emptyRun("session", "task", "job"), dir);
+    writeFileSync(path, "{broken");
+    assert.throws(() => mutateRun(path, dir, (run) => ({ ...run, task: "lost" })));
+    assert.equal(readFileSync(path, "utf8"), "{broken");
+    saveRun(path, emptyRun("session", "restored", "job"), dir);
+    rmSync(aliases.md);
+    mkdirSync(aliases.md);
+    assert.throws(() => mutateRun(path, dir, (run) => ({ ...run, task: "committed" })));
+    assert.equal(loadRun(path)?.task, "committed");
+    rmSync(aliases.md, { recursive: true });
+    mutateRun(path, dir, (run) => ({ ...run, spec: "recovered" }));
+    assert.equal(JSON.parse(readFileSync(aliases.json, "utf8")).spec, "recovered");
+    assert.match(readFileSync(aliases.md, "utf8"), /recovered/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("clear-on-new-task removes json and mockup dir", () => {
   const agentDir = mkdtempSync(join(tmpdir(), "devteam-agent-"));
   const sessionId = "sess-1";
@@ -38,6 +170,7 @@ test("clear-on-new-task removes json and mockup dir", () => {
     {
       load: () => loadRun(paths.json),
       save: (next) => saveRun(paths.json, next),
+      mutate: (change) => mutateRun(paths.json, undefined, change),
       agentDir: () => agentDir,
       sessionId: () => sessionId,
     },
@@ -164,6 +297,9 @@ test("devteam_state get/replace and handoff pending", () => {
   const store = {
     load: () => loadRun(path),
     save: (run: ReturnType<typeof emptyRun>) => saveRun(path, run),
+    mutate: (
+      change: (run: ReturnType<typeof emptyRun>) => ReturnType<typeof emptyRun> | undefined,
+    ) => mutateRun(path, undefined, change),
     agentDir: () => agentDir,
     sessionId: () => sessionId,
   };
@@ -175,6 +311,33 @@ test("devteam_state get/replace and handoff pending", () => {
   assert.equal(handoff.terminate, true);
   assert.equal(loadRun(path)?.pendingHandoff?.action, "plan_ready");
 });
+test("scout handoff rejects blank findings and accepts recovery", () => {
+  let run = emptyRun("scout", "task");
+  run.scoutItems = [{ id: "a", title: "Research", files: [], status: "running", attempts: 1 }];
+  const store = {
+    load: () => run,
+    save: (next: typeof run) => {
+      run = next;
+    },
+    mutate: (change: (run: typeof run) => typeof run | undefined) => {
+      run = change(run) ?? run;
+      return run;
+    },
+    agentDir: () => "",
+    sessionId: () => "scout",
+    taskId: () => "a",
+  };
+  for (const summary of [undefined, "", " \n "]) {
+    const result = applyHandoffTool(store, { action: "scout_done", summary });
+    assert.equal(result.isError, true);
+    assert.equal(result.terminate, false);
+    assert.equal(run.scoutItems?.[0]?.status, "running");
+  }
+  const result = applyHandoffTool(store, { action: "scout_done", summary: "Found src/main.ts" });
+  assert.equal(result.terminate, true);
+  assert.equal(run.scoutItems?.[0]?.findings, "Found src/main.ts");
+  assert.equal(run.scoutItems?.[0]?.status, "done");
+});
 test("devteam_state get accepts a section list and rejects unknown names", () => {
   const agentDir = mkdtempSync(join(tmpdir(), "devteam-agent-"));
   const sessionId = "s3";
@@ -183,6 +346,9 @@ test("devteam_state get accepts a section list and rejects unknown names", () =>
   const store = {
     load: () => loadRun(path),
     save: (run: ReturnType<typeof emptyRun>) => saveRun(path, run),
+    mutate: (
+      change: (run: ReturnType<typeof emptyRun>) => ReturnType<typeof emptyRun> | undefined,
+    ) => mutateRun(path, undefined, change),
     agentDir: () => agentDir,
     sessionId: () => sessionId,
   };

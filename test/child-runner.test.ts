@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createChildRunner, type ChildHostPort } from "../src/child-runner.ts";
+import { resetRejectedFlags } from "../src/spawn.ts";
 import { clearJudgeCache } from "../src/judge.ts";
 import type { ExtensionContext } from "../src/pi-host.ts";
-import { emptyRun, saveRun } from "../src/state.ts";
+import { emptyRun, loadRun, saveRun } from "../src/state.ts";
 import type { ChildActivity } from "../src/child-progress.ts";
 import type { Catalog, RunState } from "../src/types.ts";
 import type { Store } from "../src/tools.ts";
@@ -99,6 +100,7 @@ test("child runner infers a missing reviewer handoff through step", async () => 
 });
 
 test("child runner retries once when the host rejects unknown flags", async () => {
+  resetRejectedFlags();
   const dir = mkdtempSync(join(tmpdir(), "devteam-child-"));
   const statePath = join(dir, "run.json");
   let run: RunState = {
@@ -113,6 +115,14 @@ test("child runner retries once when the host rejects unknown flags", async () =
     save(next) {
       run = next;
       saveRun(statePath, next, dir);
+    },
+    mutate(change) {
+      const next = change(run);
+      if (next) {
+        run = next;
+        saveRun(statePath, next, dir);
+      }
+      return run;
     },
     agentDir: () => dir,
     sessionId: () => "job",
@@ -150,6 +160,8 @@ test("child runner retries once when the host rejects unknown flags", async () =
     logProgress() {},
     notify() {},
     refreshUi() {},
+    trusted: () => true,
+    isOmp: () => false,
   });
 
   const out = await runner.run(ctx(dir), run, "commit_message");
@@ -369,4 +381,84 @@ test("tester skips bash judge when every bash exited 0", async () => {
   assert.equal(harness.run.stage, "linter");
   assert.equal(harness.run.testFailed, false);
   assert.equal(judged, 0);
+});
+
+test("scout runner rejects an already-done item without findings and preserves newer state", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "devteam-child-"));
+  const stale = emptyRun("job", "task");
+  stale.stage = "scout";
+  const current = {
+    ...stale,
+    scoutItems: [
+      {
+        id: "a",
+        title: "Research",
+        files: [],
+        status: "done" as const,
+        attempts: 1,
+        findings: "  ",
+      },
+    ],
+    scoutNotes: "newer state",
+  };
+  const harness = runnerHarness(current, dir);
+  const result = await harness.runner.run(ctx(dir), stale, "scout", {
+    list: "scout",
+    id: "a",
+    title: "Research",
+    files: [],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /without scout findings/);
+  const saved = loadRun(join(dir, "run.json"));
+  assert.equal(saved?.scoutNotes, "newer state");
+  assert.equal(saved?.scoutItems?.[0]?.status, "failed");
+  assert.match(saved?.scoutItems?.[0]?.error ?? "", /without scout findings/);
+});
+
+test("a failed assigned child leaves the wave lock for its siblings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "devteam-wave-"));
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const host: ChildHostPort = {
+    start() {
+      return {
+        process: {} as SpawnedChild["process"],
+        abort() {},
+        done: held.then(() => ({ code: 1, stderr: "fail", stdout: "", output: "fail" })),
+      };
+    },
+  };
+  const run: RunState = {
+    ...emptyRun("s", "task", "job"),
+    stage: "implement",
+    pipelineLocked: true,
+    workItems: [
+      {
+        id: "a",
+        layer: "backend",
+        title: "A",
+        files: ["a.ts"],
+        dependsOn: [],
+        status: "running",
+        attempts: 1,
+      },
+    ],
+  };
+  const harness = runnerHarness(run, dir, { host });
+  const pending = harness.runner.run(ctx(dir), run, "backend", {
+    list: "work",
+    id: "a",
+    title: "A",
+    files: ["a.ts"],
+    dependsOn: [],
+  });
+  await Promise.resolve();
+  assert.equal(loadRun(join(dir, "run.json"))?.pipelineLocked, true);
+  release?.();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(loadRun(join(dir, "run.json"))?.pipelineLocked, true);
 });

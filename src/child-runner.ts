@@ -181,12 +181,15 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     assignment?: ChildAssignment,
   ): Promise<ChildOutcome> {
     const config = deps.config();
-    const locked = deps.persist({
-      ...run,
+    const statePath = deps.statePath();
+    const lock = (current: RunState) => ({
+      ...current,
       pipelineLocked: true,
       currentRole: role,
       updatedAt: new Date().toISOString(),
     });
+    const locked = deps.store.mutate(lock);
+    if (!locked) return { ok: false, error: "active run no longer exists" };
     deps.refreshUi(ctx, locked);
     const services = locked.stack?.services ?? [];
     const service = serviceByName(services, assignment?.service ?? locked.currentService);
@@ -220,6 +223,7 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     const promptExtras = role === "reviewer" ? reviewScope(latest) : {};
     const omp = deps.isOmp?.() ?? isOmpHost();
     let args = buildChildCliArgs({
+      omp,
       extensionPath: (deps.extensionEntry ?? thisExtensionEntry)(),
       rolePromptFile: promptFile,
       role,
@@ -261,92 +265,106 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     });
 
     let abortReason: string | undefined;
-    const runChild = async () => {
-      abortReason = undefined;
-      activity.toolCalls = 0;
-      activity.recentTools = [];
-      activity.label = "";
-      let stopChild = () => {};
-      const spawned = deps.host.start({
-        args,
-        cwd: ctx.cwd,
-        env: childProcessEnv(role, deps.statePath(), process.env, {
-          serviceName: service?.name,
-          taskId: assignment?.id,
-        }),
-        onOutput: () => {
-          activity.lastEventAt = Date.now();
-        },
-        onProgress: (update) => {
-          if (update.kind === "tool") {
-            activity.toolCalls += 1;
-            activity.recentTools.push(update.label);
-            if (activity.recentTools.length > 40)
-              activity.recentTools.splice(0, activity.recentTools.length - 40);
-            if (repeatLimit && isRepeatedToolLoop(activity.recentTools, repeatLimit)) {
-              abortReason = `${label} repeated ${repeatLimit} identical tool calls and was stopped.`;
-              stopChild();
-              return;
+    let result: Awaited<SpawnedChild["done"]>;
+    try {
+      const runChild = async () => {
+        abortReason = undefined;
+        activity.toolCalls = 0;
+        activity.recentTools = [];
+        activity.label = "";
+        let stopChild = () => {};
+        const spawned = deps.host.start({
+          args,
+          cwd: ctx.cwd,
+          env: childProcessEnv(role, deps.statePath(), process.env, {
+            serviceName: service?.name,
+            taskId: assignment?.id,
+          }),
+          onOutput: () => {
+            activity.lastEventAt = Date.now();
+          },
+          onProgress: (update) => {
+            if (update.kind === "tool") {
+              activity.toolCalls += 1;
+              activity.recentTools.push(update.label);
+              if (activity.recentTools.length > 40)
+                activity.recentTools.splice(0, activity.recentTools.length - 40);
+              if (repeatLimit && isRepeatedToolLoop(activity.recentTools, repeatLimit)) {
+                abortReason = `${label} repeated ${repeatLimit} identical tool calls and was stopped.`;
+                stopChild();
+                return;
+              }
             }
-          }
-          const shouldPost =
-            update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
-          activity.label = update.label;
-          activity.lastEventAt = Date.now();
-          if (shouldPost) {
-            deps.logProgress(ctx, {
-              kind: update.kind === "tool" ? "tool" : "stage",
-              role: activity.role,
-              label: update.label,
-              text: toolLogText(activity.role, update.label),
-            });
-          } else {
-            deps.refreshUi(ctx, deps.store.load());
-          }
-          if (activity.toolCalls >= budget) {
-            abortReason = `${label} hit the ${budget} tool-call budget and was stopped.`;
-            stopChild();
-          }
-        },
-      });
-      stopChild = spawned.abort;
-      activity.abort = spawned.abort;
-      deps.setAbortChild(spawned.abort);
-      deps.aborts.add(spawned.abort);
-      try {
-        return await spawned.done;
-      } finally {
-        deps.aborts.delete(spawned.abort);
-        if (deps.getAbortChild() === spawned.abort) deps.setAbortChild(undefined);
-      }
-    };
+            const shouldPost =
+              update.kind === "tool" || Boolean(update.label && update.label !== activity.label);
+            activity.label = update.label;
+            activity.lastEventAt = Date.now();
+            if (shouldPost) {
+              deps.logProgress(ctx, {
+                kind: update.kind === "tool" ? "tool" : "stage",
+                role: activity.role,
+                label: update.label,
+                text: toolLogText(activity.role, update.label),
+              });
+            } else {
+              deps.refreshUi(ctx, deps.store.load());
+            }
+            if (activity.toolCalls >= budget) {
+              abortReason = `${label} hit the ${budget} tool-call budget and was stopped.`;
+              stopChild();
+            }
+          },
+        });
+        stopChild = () => abort();
+        let aborted = false;
+        const abort = () => {
+          if (aborted) return;
+          aborted = true;
+          spawned.abort();
+        };
+        activity.abort = abort;
+        deps.setAbortChild(abort);
+        deps.aborts.add(abort);
+        try {
+          return await spawned.done;
+        } finally {
+          deps.aborts.delete(abort);
+          if (deps.getAbortChild() === abort) deps.setAbortChild(undefined);
+        }
+      };
 
-    let result = await runChild();
-    for (let attempt = 0; attempt < 2 && result.code !== 0; attempt += 1) {
-      const unknown = parseUnknownFlags(result.output).filter((flag) => args.includes(flag));
-      if (!unknown.length) break;
-      rememberRejectedFlags(unknown);
-      const retryArgs = adaptArgsForUnknownFlags(args, unknown);
-      if (retryArgs.join("\u0000") === args.join("\u0000")) break;
-      args = retryArgs;
-      deps.notify(
-        ctx,
-        `devteam: host rejected ${unknown.join(", ")}; retrying ${label} without them.`,
-        "warning",
-      );
       result = await runChild();
+      for (let attempt = 0; attempt < 2 && result.code !== 0; attempt += 1) {
+        const unknown = parseUnknownFlags(result.output).filter((flag) => args.includes(flag));
+        if (!unknown.length) break;
+        rememberRejectedFlags(unknown);
+        const retryArgs = adaptArgsForUnknownFlags(args, unknown);
+        if (retryArgs.join("\u0000") === args.join("\u0000")) break;
+        args = retryArgs;
+        deps.notify(
+          ctx,
+          `devteam: host rejected ${unknown.join(", ")}; retrying ${label} without them.`,
+          "warning",
+        );
+        result = await runChild();
+      }
+    } finally {
+      deps.activities.delete(activityKey);
+      deps.stopProgressReporting(ctx);
     }
-
-    deps.activities.delete(activityKey);
-    deps.stopProgressReporting(ctx);
+    if (deps.statePath() !== statePath) {
+      return { ok: false, error: "active run changed while child was running" };
+    }
 
     const next = deps.store.load() ?? latest;
     if (next.halted || next.stage !== locked.stage) {
-      deps.persist({
-        ...next,
-        pipelineLocked: false,
-        pendingHandoff: next.halted ? undefined : next.pendingHandoff,
-      });
+      if (!assignment) {
+        mutateRun(deps.statePath(), deps.agentDir(), (current) => ({
+          ...current,
+          pipelineLocked: false,
+          pendingHandoff: current.halted ? undefined : current.pendingHandoff,
+        }));
+      }
       deps.logProgress(ctx, {
         kind: "finish",
         role: activity.role,
@@ -359,22 +377,32 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     const elapsed = formatElapsed(Date.now() - activity.startedAt);
     const failItem = (error: string) => {
       if (assignment?.list === "scout") {
-        mutateRun(deps.statePath(), deps.agentDir(), (current) => ({
-          ...current,
-          scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
-            status: "failed",
-            error,
-          }),
-          lastError: error,
-          pipelineLocked: false,
-        }));
+        mutateRun(statePath, deps.agentDir(), (current) =>
+          current.halted || current.stage !== locked.stage
+            ? undefined
+            : {
+                ...current,
+                scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
+                  status: "failed",
+                  error,
+                  findings: undefined,
+                }),
+                lastError: error,
+              },
+        );
       } else if (assignment) {
-        mutateRun(deps.statePath(), deps.agentDir(), (current) => ({
-          ...current,
-          workItems: setItemStatus(current.workItems, assignment.id, { status: "failed", error }),
-          lastError: error,
-          pipelineLocked: false,
-        }));
+        mutateRun(statePath, deps.agentDir(), (current) =>
+          current.halted || current.stage !== locked.stage
+            ? undefined
+            : {
+                ...current,
+                workItems: setItemStatus(current.workItems, assignment.id, {
+                  status: "failed",
+                  error,
+                }),
+                lastError: error,
+              },
+        );
       } else {
         deps.persist({ ...next, pipelineLocked: false, lastError: error, currentRole: role });
       }
@@ -419,25 +447,35 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     if (assignment) {
       const doneAction = assignment.list === "scout" ? "scout_done" : "implementor_done";
       if (after.pendingHandoff?.action === doneAction) {
-        mutateRun(deps.statePath(), deps.agentDir(), (current) => ({
-          ...current,
-          pendingHandoff: undefined,
-        }));
+        mutateRun(statePath, deps.agentDir(), (current) =>
+          current.halted ||
+          current.stage !== locked.stage ||
+          current.pendingHandoff?.action !== doneAction
+            ? undefined
+            : {
+                ...current,
+                pendingHandoff: undefined,
+              },
+        );
       }
       if (assignment.list === "scout") {
         const item = findScout(deps.store.load()?.scoutItems, assignment.id);
-        if (item?.status !== "done") {
-          if (!item?.findings?.trim()) {
-            return failItem(`${label} finished without scout findings or a handoff.`);
-          }
-          mutateRun(deps.statePath(), deps.agentDir(), (current) => ({
-            ...current,
-            scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
-              status: "done",
-              error: undefined,
-              findings: item.findings,
-            }),
-          }));
+        if (!item?.findings?.trim()) {
+          return failItem(`${label} finished without scout findings or a handoff.`);
+        }
+        if (item.status !== "done") {
+          mutateRun(statePath, deps.agentDir(), (current) => {
+            const latestItem = findScout(current.scoutItems, assignment.id);
+            if (current.halted || current.stage !== locked.stage || !latestItem?.findings?.trim())
+              return undefined;
+            return {
+              ...current,
+              scoutItems: setScoutStatus(current.scoutItems, assignment.id, {
+                status: "done",
+                error: undefined,
+              }),
+            };
+          });
         }
       } else {
         const item = findItem(deps.store.load()?.workItems, assignment.id);
@@ -473,6 +511,9 @@ export function createChildRunner(deps: ChildRunnerDeps) {
         omp,
         cwd: ctx.cwd,
       });
+      if (deps.statePath() !== statePath) {
+        return { ok: false, error: "active run changed while child was running" };
+      }
       const applied = applyBashFailureClass(bashFailed, klass);
       if (applied.halt) {
         const error = `${label}: ${applied.halt}. ${BASH_FAILURE_ADVICE[applied.halt]} /devteam continue retries.`;
@@ -489,14 +530,21 @@ export function createChildRunner(deps: ChildRunnerDeps) {
       }
       bashFailed = applied.failed;
     }
-    if (bashFailed !== undefined) {
-      if (role === "tester" && current.testFailed === undefined) {
-        current = deps.persist({ ...current, testFailed: bashFailed });
-      } else if (role === "linter" && current.lintErrors === undefined) {
-        current = deps.persist({ ...current, lintErrors: bashFailed });
-      }
-    }
-    if (!current.pendingHandoff && !inferHandoffAction(role, current)) {
+    const qaView =
+      bashFailed === undefined
+        ? current
+        : {
+            ...current,
+            testFailed:
+              role === "tester" && current.testFailed === undefined
+                ? bashFailed
+                : current.testFailed,
+            lintErrors:
+              role === "linter" && current.lintErrors === undefined
+                ? bashFailed
+                : current.lintErrors,
+          };
+    if (!current.pendingHandoff && !inferHandoffAction(role, qaView)) {
       const judged = await inferHandoffFromJudge({
         role,
         run: current,
@@ -505,6 +553,9 @@ export function createChildRunner(deps: ChildRunnerDeps) {
         omp,
         cwd: ctx.cwd,
       });
+      if (deps.statePath() !== statePath) {
+        return { ok: false, error: "active run changed while child was running" };
+      }
       if (judged) {
         current = deps.persist({
           ...current,

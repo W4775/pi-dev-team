@@ -31,7 +31,7 @@ export function resolveMockupRel(file = "index.html"): string | undefined {
 export type Store = {
   load(): RunState | undefined;
   save(run: RunState): void;
-  mutate?(change: (run: RunState) => RunState | undefined): RunState | undefined;
+  mutate(change: (run: RunState) => RunState | undefined): RunState | undefined;
   agentDir(): string;
   sessionId(): string;
   taskId?: () => string | undefined;
@@ -104,15 +104,9 @@ export function applyStateTool(
     return params.value ?? "";
   };
 
-  const write = (change: (current: RunState) => RunState) => {
-    if (store.mutate) {
-      store.mutate(change);
-      return;
-    }
-    store.save(change(run));
-  };
-
-  write((current) => updateSection(current, section, applyValue(current)));
+  if (!store.mutate((current) => updateSection(current, section, applyValue(current)))) {
+    return { text: "No active /devteam run. Start one with /devteam <task>.", isError: true };
+  }
   return { text: `Updated ${section}.` };
 }
 
@@ -126,12 +120,9 @@ export function applyHandoffTool(
     return { text: `Unknown handoff action: ${params.action}`, terminate: false, isError: true };
   }
   const taskId = store.taskId?.();
-  const write = (change: (current: RunState) => RunState) => {
-    if (store.mutate) store.mutate(change);
-    else store.save(change(run));
-  };
+  const write = (change: (current: RunState) => RunState) => store.mutate(change);
   if (taskId && params.action === "implementor_done") {
-    write((current) => ({
+    const updated = write((current) => ({
       ...current,
       workItems: setItemStatus(current.workItems, taskId, {
         status: "done",
@@ -141,13 +132,21 @@ export function applyHandoffTool(
       currentStatus: params.summary ?? `item ${taskId} done`,
       updatedAt: new Date().toISOString(),
     }));
+    if (!updated) return { text: "No active /devteam run.", terminate: false, isError: true };
     return {
       text: `Marked work item ${taskId} done. That does not advance the whole pipeline.`,
       terminate: true,
     };
   }
   if (taskId && params.action === "scout_done") {
-    write((current) => ({
+    if (!params.summary?.trim()) {
+      return {
+        text: "Scout findings are required to complete the handoff.",
+        terminate: false,
+        isError: true,
+      };
+    }
+    const updated = write((current) => ({
       ...current,
       scoutItems: setScoutStatus(current.scoutItems, taskId, {
         status: "done",
@@ -157,17 +156,19 @@ export function applyHandoffTool(
       currentStatus: params.summary ?? `scout ${taskId} done`,
       updatedAt: new Date().toISOString(),
     }));
+    if (!updated) return { text: "No active /devteam run.", terminate: false, isError: true };
     return {
       text: `Recorded scout ${taskId} findings. That does not start the planner yet.`,
       terminate: true,
     };
   }
-  write((current) => ({
+  const updated = write((current) => ({
     ...current,
     pendingHandoff: { action: params.action, summary: params.summary },
     currentStatus: params.summary ?? `handoff:${params.action}`,
     updatedAt: new Date().toISOString(),
   }));
+  if (!updated) return { text: "No active /devteam run.", terminate: false, isError: true };
   return {
     text: `Recorded handoff ${params.action}. The pipeline is advancing.`,
     terminate: true,

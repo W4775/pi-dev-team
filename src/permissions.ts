@@ -1,3 +1,6 @@
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+
 import { matchAnyGlob } from "./glob.ts";
 import { serviceCommands } from "./services.ts";
 import type {
@@ -67,6 +70,35 @@ export function pathAllowedForLayer(
   return matchAnyGlob(patterns, rel) || matchAnyGlob(patterns, filePath);
 }
 
+function withinDemoDir(filePath: string, cwd: string, demoDir: string | undefined): boolean {
+  if (!demoDir) return false;
+  try {
+    const canonical = (path: string): string => {
+      try {
+        lstatSync(path);
+        // Resolve existing symlinks outside the missing-path fallback.
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = dirname(path);
+        if (parent === path) throw error;
+        return resolve(canonical(parent), relative(parent, path));
+      }
+      return realpathSync(path);
+    };
+    const root = canonical(resolve(cwd, demoDir));
+    const target = canonical(resolve(cwd, filePath));
+    const rel = relative(root, target);
+    return (
+      rel !== "" &&
+      rel !== ".." &&
+      !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
+      !isAbsolute(rel)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type WriteGate = { block: true; reason: string } | { block: false };
 
 export function gateWrite(
@@ -76,7 +108,16 @@ export function gateWrite(
   config: ProjectConfig | undefined,
   service?: ServiceInfo,
   assignedPaths?: string[],
+  demoDir?: string,
 ): WriteGate {
+  if (role === "demo") {
+    if (!isDeniedPath(filePath, cwd) && withinDemoDir(filePath, cwd, demoDir))
+      return { block: false };
+    return {
+      block: true,
+      reason: "Demo may only write non-secret files inside its run's demo directory.",
+    };
+  }
   if (
     !role ||
     role === "planner" ||
@@ -89,7 +130,6 @@ export function gateWrite(
     role === "reviewer" ||
     role === "tester" ||
     role === "linter" ||
-    role === "demo" ||
     role === "commit_message"
   ) {
     const where =
@@ -187,7 +227,7 @@ function isLintRunner(part: string): boolean {
 function isDemoRunner(part: string): boolean {
   if (isCdOnly(part)) return true;
   if (/^(npx\s+)?playwright\b/.test(part)) return true;
-  if (/^xvfb-run\b/.test(part)) return true;
+  if (/^xvfb-run\s+(?:npx\s+)?playwright\b/.test(part)) return true;
   return /^(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start)\b/.test(part);
 }
 
@@ -201,6 +241,7 @@ export function gateBash(
   command: string,
   config: ProjectConfig | undefined,
   services?: ServiceInfo[],
+  demoDir?: string,
 ): WriteGate {
   const cmd = command.trim();
   if (!role) {
@@ -263,8 +304,16 @@ export function gateBash(
   }
 
   if (role === "demo") {
+    const script = cmd.match(/^(?:xvfb-run\s+)?node\s+(\/[^\s;&|<>$`"'()]+\.[cm]?js)$/);
+    if (script && withinDemoDir(script[1], "/", demoDir)) return { block: false };
+    // No PID supplied by the agent can establish ownership of a process.
+    if (/(?:^|[;&|\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*kill(?:\s|$)/.test(cmd))
+      return {
+        block: true,
+        reason: "Demo cannot run kill; manage its server inside the demo script.",
+      };
     const allow = [
-      ...DEFAULT_DEMO_BASH,
+      ...DEFAULT_DEMO_BASH.filter((entry) => entry !== "xvfb-run"),
       ...(config?.bash?.demo ?? []),
       ...serviceCommands(services, "serve"),
     ];

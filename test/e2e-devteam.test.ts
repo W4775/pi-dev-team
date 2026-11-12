@@ -6,7 +6,14 @@ import { fileURLToPath } from "node:url";
 import { register } from "node:module";
 import { test } from "node:test";
 import { resetProgressFeed } from "../src/ui-progress.ts";
-import { loadRun, readCurrentJobId, runPaths } from "../src/state.ts";
+import {
+  emptyRun,
+  loadRun,
+  readCurrentJobId,
+  runPaths,
+  saveRun,
+  writeCurrentJobId,
+} from "../src/state.ts";
 
 register(new URL("./helpers/e2e-loader.mjs", import.meta.url));
 
@@ -198,4 +205,169 @@ test("/devteam survives the first planner prompt and ask picker", async () => {
   assert.equal(run.stage, "planner");
   assert.equal(run.halted, false);
   assert.notEqual(run.stage, "error");
+});
+
+test("/devteam status reports the canonical job state path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-status-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = emptyRun("e2e-session", "status", "status-job");
+  const canonicalPath = runPaths(agentDir, run.jobId).json;
+  saveRun(canonicalPath, run, agentDir);
+  writeCurrentJobId(agentDir, run.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+
+  await host.commands.get("devteam")!.handler("status", ctx);
+
+  assert.ok(loadRun(canonicalPath), "canonical job state should exist");
+  assert.ok(host.notifications.at(-1)?.includes(canonicalPath));
+  assert.ok(!host.notifications.at(-1)?.includes(runPaths(agentDir, "e2e-session").json));
+});
+
+test("failed prerequisite is retried and blocked dependent never reaches review", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-blocked-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "implement dependency", "blocked-job"),
+    stage: "implement" as const,
+    cwd: ctx.cwd,
+    workItems: [
+      {
+        id: "first",
+        layer: "general" as const,
+        title: "First",
+        files: ["first.ts"],
+        dependsOn: [],
+        status: "pending" as const,
+        attempts: 0,
+      },
+      {
+        id: "second",
+        layer: "general" as const,
+        title: "Second",
+        files: ["second.ts"],
+        dependsOn: ["first"],
+        status: "pending" as const,
+        attempts: 0,
+      },
+    ],
+  };
+  saveRun(runPaths(agentDir, run.jobId).json, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, ctx);
+  const result = loadRun(runPaths(agentDir, run.jobId).json)!;
+  assert.equal(result.stage, "implement");
+  assert.equal(result.workItems?.[0]?.status, "failed");
+  assert.equal(result.workItems?.[0]?.attempts, 2);
+  assert.equal(result.workItems?.[1]?.status, "pending");
+  assert.match(result.lastError ?? "", /blocked|failed/i);
+});
+
+test("session restart preserves ambiguous locked work until manually recovered", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-restart-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "resume", "restart-job"),
+    stage: "implement" as const,
+    pipelineLocked: true,
+    workItems: [
+      {
+        id: "first",
+        layer: "general" as const,
+        title: "First",
+        files: ["first.ts"],
+        dependsOn: [],
+        status: "running" as const,
+        attempts: 1,
+      },
+    ],
+  };
+  saveRun(runPaths(agentDir, run.jobId).json, run, agentDir);
+  writeCurrentJobId(agentDir, run.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+  const restored = loadRun(runPaths(agentDir, run.jobId).json)!;
+  assert.equal(restored.pipelineLocked, true);
+  assert.equal(restored.workItems?.[0]?.status, "running");
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, ctx);
+  assert.equal(loadRun(runPaths(agentDir, run.jobId).json)?.workItems?.[0]?.status, "running");
+});
+
+test("session startup and job selection do not reset an owned wave", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-owned-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const owned = {
+    ...emptyRun("other-session", "active work", "owned-job"),
+    stage: "implement" as const,
+    pipelineLocked: true,
+    pipelineOwner: "another-orchestrator",
+    workItems: [
+      {
+        id: "active",
+        layer: "general" as const,
+        title: "Active",
+        files: [],
+        dependsOn: [],
+        status: "running" as const,
+        attempts: 1,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, owned.jobId).json;
+  saveRun(path, owned, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${owned.jobId}`, ctx);
+  assert.equal(loadRun(path)?.pipelineOwner, owned.pipelineOwner);
+  assert.equal(loadRun(path)?.workItems?.[0]?.status, "running");
+  writeCurrentJobId(agentDir, owned.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+  const restored = loadRun(path)!;
+  assert.equal(restored.pipelineLocked, true);
+  assert.equal(restored.pipelineOwner, owned.pipelineOwner);
+  assert.equal(restored.workItems?.[0]?.status, "running");
+});
+
+test("exhausted scout failure does not advance to planner", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-scout-failure-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "scout", "scout-job"),
+    stage: "scout" as const,
+    scoutItems: [
+      {
+        id: "s1",
+        title: "Map repo",
+        files: [],
+        status: "failed" as const,
+        attempts: 2,
+        error: "failed",
+      },
+    ],
+  };
+  saveRun(runPaths(agentDir, run.jobId).json, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, ctx);
+  const result = loadRun(runPaths(agentDir, run.jobId).json)!;
+  assert.equal(result.stage, "scout");
+  assert.match(result.lastError ?? "", /incomplete/i);
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  const recovered = loadRun(runPaths(agentDir, run.jobId).json)!;
+  assert.equal(recovered.stage, "planner");
+  assert.equal(recovered.scoutItems?.[0]?.status, "done");
+  assert.equal(recovered.scoutItems?.[0]?.attempts, 3);
+});
+
+test("headless plan review does not accept critic suggestions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-plan-consent-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "plan", "plan-job"),
+    stage: "plan_review" as const,
+    planCritique: {
+      notes: "Review",
+      replacedScope: false,
+      items: [{ id: "c1", title: "Suggestion", text: "Change plan" }],
+    },
+  };
+  saveRun(runPaths(agentDir, run.jobId).json, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, { ...ctx, hasUI: false });
+  const result = loadRun(runPaths(agentDir, run.jobId).json)!;
+  assert.equal(result.stage, "plan_review");
+  assert.notEqual(result.planCritique?.items?.[0]?.decision, "accept");
+  assert.match(result.lastError ?? "", /explicit decisions/i);
 });

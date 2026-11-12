@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -154,6 +155,57 @@ test("undefined role fails closed on bash", () => {
 
 test("demo cannot write the repo", () => {
   assert.equal(gateWrite("demo", "/repo/src/app.ts", "/repo", undefined).block, true);
+});
+
+test("demo artifacts and script execution stay within its job directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "demo-gate-"));
+  const demo = join(root, "job", "demo");
+  const outside = join(root, "outside");
+  mkdirSync(demo, { recursive: true });
+  mkdirSync(outside);
+  symlinkSync(outside, join(demo, "link"));
+  const write = (path: string) =>
+    gateWrite("demo", path, root, undefined, undefined, undefined, demo).block;
+  const bash = (command: string) => gateBash("demo", command, undefined, undefined, demo).block;
+  assert.equal(write(join(demo, "demo.cjs")), false);
+  assert.equal(write(join(demo, "nested", "shot.png")), false);
+  assert.equal(write(join(demo, "..", "other", "demo.cjs")), true);
+  assert.equal(write(join(demo, "link", "demo.cjs")), true);
+  assert.equal(write(join(demo, ".env")), true);
+  assert.equal(gateWrite("demo", join(demo, "demo.cjs"), root, undefined).block, true);
+  assert.equal(bash(`node ${demo}/demo.cjs`), false);
+  assert.equal(bash(`xvfb-run node ${demo}/demo.cjs`), false);
+  assert.equal(bash(`node ${outside}/demo.cjs`), true);
+  assert.equal(bash(`node ${demo}/link/demo.cjs`), true);
+  assert.equal(bash(`node ${demo}/demo.cjs; rm -rf /`), true);
+  assert.equal(bash("xvfb-run rm -rf /"), true);
+  assert.equal(bash("kill 12345"), true);
+  assert.equal(bash("kill -9 12345"), true);
+  assert.equal(bash("npm run dev & kill 12345"), true);
+  assert.equal(bash("FOO=bar kill 12345"), true);
+  assert.equal(
+    gateBash("demo", "kill 12345", { bash: { demo: ["kill"] } }, undefined, demo).block,
+    true,
+  );
+});
+
+test("demo script resolves project-local Playwright outside the project tree", () => {
+  const root = mkdtempSync(join(tmpdir(), "demo-resolution-"));
+  const project = join(root, "project");
+  const demo = join(root, "agent", "job", "demo");
+  const moduleDir = join(project, "node_modules", "playwright");
+  mkdirSync(moduleDir, { recursive: true });
+  mkdirSync(demo, { recursive: true });
+  writeFileSync(join(moduleDir, "index.js"), 'module.exports = { chromium: "project-local" };');
+  const script = join(demo, "demo.cjs");
+  writeFileSync(
+    script,
+    `const { createRequire } = require("node:module");\n` +
+      `const projectRequire = createRequire(${JSON.stringify(join(project, "package.json"))});\n` +
+      `process.stdout.write(projectRequire("playwright").chromium);\n`,
+  );
+  assert.equal(gateBash("demo", `node ${script}`, undefined, undefined, demo).block, false);
+  assert.equal(execFileSync(process.execPath, [script], { encoding: "utf8" }), "project-local");
 });
 
 test("read-only bash is per-segment inspect only", () => {

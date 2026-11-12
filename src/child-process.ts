@@ -9,7 +9,50 @@ export type ChildResult = {
   output: string;
 };
 
+// POSIX group leader remains alive until the parent acknowledges completion or
+// escalation kills the group. Only the leader signals its own group, so a
+// recycled PID can never cause an unrelated process to be signalled.
+const supervisor = `
+const { spawn } = require("node:child_process");
+let aborted = false;
+let result;
+process.on("SIGTERM", () => {});
+process.on("message", (message) => {
+  if (message === "abort" && !aborted) {
+    aborted = true;
+    process.kill(-process.pid, "SIGTERM");
+    setTimeout(() => process.kill(-process.pid, "SIGKILL"), 2000);
+  } else if (message === "finish" && !aborted && result) {
+    if (result.signal) {
+      process.removeAllListeners(result.signal);
+      process.kill(process.pid, result.signal);
+    } else {
+      process.exit(result.code);
+    }
+  }
+});
+process.on("disconnect", () => {
+  if (!aborted) {
+    aborted = true;
+    process.kill(-process.pid, "SIGTERM");
+    setTimeout(() => process.kill(-process.pid, "SIGKILL"), 2000);
+  }
+});
+const [command, ...args] = JSON.parse(process.argv[1]);
+const child = spawn(command, args, { stdio: ["ignore", "inherit", "inherit"] });
+let spawnError = false;
+child.on("error", (error) => {
+  spawnError = true;
+  process.stderr.write("\\n" + error.message);
+});
+child.on("close", (code, signal) => {
+  result = { code: spawnError ? 1 : code ?? 1, signal };
+  if (process.connected) process.send("finished");
+});
+`;
+
 export type SpawnedChild = {
+  /** On POSIX this is the process-group supervisor, not the invoked child. */
   process: ChildProcess;
   done: Promise<ChildResult>;
   abort: () => void;
@@ -47,12 +90,25 @@ export function spawnPiChild(opts: {
 }): SpawnedChild {
   assertNoNoExtensions(opts.args);
   const invocation = getPiInvocation(opts.args, opts.env ?? process.env);
-  const proc = spawn(invocation.command, invocation.args, {
-    cwd: opts.cwd,
-    env: opts.env ?? process.env,
-    shell: invocation.shell,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const supervised = process.platform !== "win32";
+  // Packed hosts are not necessarily JavaScript runtimes; Node is the
+  // supported runtime and is used to run the small supervisor in that case.
+  const runtime = /(?:^|[/\\])(?:node|bun)(?:\.exe)?$/i.test(process.execPath)
+    ? process.execPath
+    : "node";
+  const proc = supervised
+    ? spawn(runtime, ["-e", supervisor, JSON.stringify([invocation.command, ...invocation.args])], {
+        cwd: opts.cwd,
+        env: opts.env ?? process.env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      })
+    : spawn(invocation.command, invocation.args, {
+        cwd: opts.cwd,
+        env: opts.env ?? process.env,
+        shell: invocation.shell,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
   let stderr = "";
   let stdout = "";
@@ -82,11 +138,28 @@ export function spawnPiChild(opts: {
     report(progress.push(chunk));
   });
 
+  let killTimer: NodeJS.Timeout | undefined;
+  let finished = false;
+  let aborting = false;
+  let childFinished = false;
+  if (supervised) {
+    proc.on("message", (message) => {
+      if (message !== "finished" || aborting) return;
+      childFinished = true;
+      if (proc.connected) proc.send("finish", () => {});
+    });
+  }
   const abort = () => {
-    if (!proc.killed) proc.kill("SIGTERM");
-    setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, 2000).unref();
+    if (finished || aborting || childFinished) return;
+    aborting = true;
+    if (supervised) {
+      if (proc.connected) proc.send("abort", () => {});
+    } else {
+      // Windows has no POSIX process groups: only the direct child is killed.
+      proc.kill("SIGTERM");
+      killTimer = setTimeout(() => proc.kill("SIGKILL"), 2000);
+      killTimer.unref();
+    }
   };
 
   if (opts.signal) {
@@ -96,6 +169,10 @@ export function spawnPiChild(opts: {
 
   const done = new Promise<ChildResult>((resolve) => {
     const finish = (code: number, extra = "") => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(killTimer);
+      opts.signal?.removeEventListener("abort", abort);
       report(progress.flush());
       const err = extra ? `${stderr}\n${extra}` : stderr;
       const output = [err, stdout].filter((part) => part.trim().length > 0).join("\n");

@@ -279,6 +279,12 @@ test("plan critic tools do not include edit/write", () => {
   assert.ok(tools.includes("devteam_handoff"));
 });
 
+test("demo tools can write gated artifacts", () => {
+  const tools = toolsForRole("demo");
+  assert.ok(tools.includes("write"));
+  assert.ok(tools.includes("edit"));
+});
+
 test("orchestrator tools are read-only plus state/handoff", () => {
   const tools = toolsForRole("orchestrator");
   assert.equal(tools.includes("edit"), false);

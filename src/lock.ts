@@ -1,64 +1,47 @@
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, rmSync, statSync } from "node:fs";
 
-const STALE_MS = 15_000;
 const WAIT_TOTAL_MS = 8_000;
 const WAIT_STEP_MS = 25;
-
-function sleepSync(ms: number): void {
-  const until = Date.now() + ms;
-  while (Date.now() < until) {
-    /* spin: lock hold times are milliseconds */
-  }
-}
-
-function lockPathFor(target: string): string {
-  return `${target}.lock`;
-}
-
-function acquire(lockPath: string): boolean {
-  try {
-    mkdirSync(lockPath);
-    return true;
-  } catch {
-    try {
-      const age = Date.now() - statSync(lockPath).mtimeMs;
-      if (age > STALE_MS) {
-        rmSync(lockPath, { recursive: true, force: true });
-        mkdirSync(lockPath);
-        return true;
-      }
-    } catch {
-      /* still held */
-    }
-    return false;
-  }
-}
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 
 /**
- * Cross-process lock for run-state writes. Parallel implementor children
- * append notes at the same time; an unlocked read-modify-write loses one.
+ * Cross-process lock for run-state read-modify-write operations.
+ * After a crash, stop all writers and remove the abandoned .lock directory manually.
+ * PID/age checks cannot safely unlink a lock that may have been replaced meanwhile.
  */
 export function withStateLock<T>(target: string, fn: () => T): T {
-  const lockPath = lockPathFor(target);
+  const lockPath = `${target}.lock`;
   const deadline = Date.now() + WAIT_TOTAL_MS;
-  while (!acquire(lockPath)) {
-    if (Date.now() >= deadline) break;
-    sleepSync(WAIT_STEP_MS);
-  }
-  if (!existsSync(lockPath)) {
+  while (true) {
     try {
       mkdirSync(lockPath);
-    } catch {
-      /* proceed anyway — better a race than a hang */
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out acquiring state lock: ${lockPath}. If abandoned, stop all writers before removing this directory manually.`,
+        );
+      }
+      Atomics.wait(sleepBuffer, 0, 0, WAIT_STEP_MS);
     }
   }
+
+  const owner = statSync(lockPath);
+  let result: T;
+  let cleanupError: unknown;
   try {
-    return fn();
+    result = fn();
   } finally {
     try {
-      rmSync(lockPath, { recursive: true, force: true });
-    } catch {
-      /* ignore */
+      const current = statSync(lockPath);
+      if (current.dev === owner.dev && current.ino === owner.ino) {
+        rmSync(lockPath, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
     }
   }
+  if (cleanupError) throw cleanupError;
+  return result;
 }

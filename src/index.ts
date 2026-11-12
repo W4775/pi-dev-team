@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
@@ -14,7 +15,7 @@ import { onAgentIdle, projectTrusted, sessionIdFromContext } from "./host-compat
 import { loadCatalog } from "./catalog.ts";
 import { loadDevteamConfig } from "./config.ts";
 import { parseDevteamArgs } from "./command-args.ts";
-import { listJobs, loadJob, newJobId, renderJobList, resolveJobRef } from "./jobs.ts";
+import { listJobs, newJobId, renderJobList, resolveJobRef } from "./jobs.ts";
 import { processChildHost, createChildRunner } from "./child-runner.ts";
 import {
   activityLine,
@@ -81,7 +82,7 @@ import type {
 } from "./types.ts";
 import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS } from "./types.ts";
 import { findItem, itemsRemaining, nextWave, retryableItems } from "./work.ts";
-import { compileScoutNotes, nextScoutWave } from "./scout.ts";
+import { compileScoutNotes, nextScoutWave, retryableScouts } from "./scout.ts";
 import {
   applyChrome,
   clearChrome,
@@ -192,6 +193,7 @@ export default function (pi: ExtensionAPI) {
   let defaultTools: string[] | undefined;
   let abortChild: (() => void) | undefined;
   let advancing = false;
+  const owner = randomUUID();
   let dialogAbort = new AbortController();
   const childAborts = new Set<() => void>();
   const childActivities = new Map<string, ChildActivity>();
@@ -345,8 +347,9 @@ export default function (pi: ExtensionAPI) {
 
   function persist(run: RunState): RunState {
     if (run.jobId) jobId = run.jobId;
-    store.save(run);
-    return run;
+    const next = advancing ? { ...run, pipelineOwner: owner } : run;
+    store.save(next);
+    return next;
   }
 
   const childRunner = createChildRunner({
@@ -402,28 +405,40 @@ export default function (pi: ExtensionAPI) {
       notify(ctx, `No job matches "${ref}". /devteam list to see saved jobs.`, "warning");
       return;
     }
-    const loaded = loadJob(agentDirSafe(), picked.jobId) ?? loadRun(picked.file);
-    if (!loaded) {
-      notify(ctx, `Could not load job ${picked.jobId}.`, "error");
-      return;
-    }
-    abortAllChildren();
-    jobId = picked.jobId;
-    if (loaded.sessionId) sessionId = loaded.sessionId;
-    const attached = persist(
-      attachRunForResume({
-        ...loaded,
+    const path = runPaths(agentDirSafe(), picked.jobId).json;
+    let blocked = false;
+    const attached = mutateRun(path, agentDirSafe(), (loaded) => {
+      if (loaded.pipelineOwner || loaded.pipelineLocked) {
+        blocked = true;
+        return undefined;
+      }
+      return {
+        ...attachRunForResume(loaded),
         jobId: picked.jobId,
         cwd: loaded.cwd ?? ctx.cwd,
-      }),
-    );
+        pipelineOwner: owner,
+      };
+    });
+    if (!attached) {
+      notify(
+        ctx,
+        blocked
+          ? "Job is owned or locked. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON."
+          : `Could not load job ${picked.jobId}.`,
+        "warning",
+      );
+      return;
+    }
+    jobId = picked.jobId;
+    if (attached.sessionId) sessionId = attached.sessionId;
     notify(
       ctx,
       `Resumed job ${picked.jobId} at ${attached.stage} (progress kept). ${attached.task || ""}`.trim(),
     );
 
-    const next = persist(step(attached));
+    const next = persist(step(attached.halted ? applyContinue(attached) : attached));
     if (next.stage === "done") {
+      store.mutate((current) => ({ ...current, pipelineOwner: undefined }));
       applyParentTools(next);
       refreshUi(ctx, next);
       notify(ctx, "This job is finished. /devteam status shows the draft commit message.");
@@ -431,6 +446,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (needsParentKick(next.stage)) {
+      store.mutate((current) => ({ ...current, pipelineOwner: undefined }));
       applyParentTools(next);
       refreshUi(ctx, next);
       await kickParent(ctx, next, { resume: true });
@@ -628,15 +644,15 @@ export default function (pi: ExtensionAPI) {
 
   async function runWave(ctx: ExtensionContext, run: RunState, wave: WorkItem[]): Promise<void> {
     const ids = new Set(wave.map((item) => item.id));
-    persist({
-      ...run,
+    store.mutate((current) => ({
+      ...current,
       pipelineLocked: true,
-      workItems: (run.workItems ?? []).map((item) =>
+      workItems: (current.workItems ?? []).map((item) =>
         ids.has(item.id)
           ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined }
           : item,
       ),
-    });
+    }));
     await Promise.all(
       wave.map((item) =>
         spawnRole(ctx, store.load() ?? run, item.layer, { ...item, list: "work" }),
@@ -652,7 +668,8 @@ export default function (pi: ExtensionAPI) {
         if (current.halted) return;
         if (current.stage !== "implement") return;
 
-        if (!itemsRemaining(current.workItems).length) {
+        const wave = nextWave(current.workItems, config?.parallel);
+        if (!wave.length) {
           const retry = retryableItems(current.workItems);
           if (retry.length) {
             const ids = new Set(retry.map((item) => item.id));
@@ -665,19 +682,18 @@ export default function (pi: ExtensionAPI) {
             });
             continue;
           }
-          persist(enterReview(current));
-          return;
-        }
-
-        const wave = nextWave(current.workItems, config?.parallel);
-        if (!wave.length) {
-          persist(
-            enterReview({
+          if (
+            !itemsRemaining(current.workItems).length &&
+            !(current.workItems ?? []).some((item) => item.status === "failed")
+          ) {
+            persist(enterReview(current));
+          } else {
+            persist({
               ...current,
               lastError:
-                current.lastError ?? "Work items were blocked; continuing to review the slice.",
-            }),
-          );
+                "Implementation is blocked or failed. Use /devteam status for details, /devteam retry to retry failed work, or /devteam skip to review incomplete work.",
+            });
+          }
           return;
         }
         await runWave(ctx, current, wave);
@@ -696,15 +712,15 @@ export default function (pi: ExtensionAPI) {
     wave: NonNullable<RunState["scoutItems"]>,
   ): Promise<void> {
     const ids = new Set(wave.map((item) => item.id));
-    persist({
-      ...run,
+    store.mutate((current) => ({
+      ...current,
       pipelineLocked: true,
-      scoutItems: (run.scoutItems ?? []).map((item) =>
+      scoutItems: (current.scoutItems ?? []).map((item) =>
         ids.has(item.id)
           ? { ...item, status: "running" as const, attempts: item.attempts + 1, error: undefined }
           : item,
       ),
-    });
+    }));
     await Promise.all(
       wave.map((item) =>
         spawnRole(ctx, store.load() ?? run, "scout", {
@@ -725,23 +741,38 @@ export default function (pi: ExtensionAPI) {
       for (;;) {
         const current = store.load() ?? run;
         if (current.halted) return;
-        if (!itemsRemaining(current.scoutItems).length) {
-          persist(
-            goToStage(
-              { ...current, scoutNotes: compileScoutNotes(current.scoutItems, current.scoutNotes) },
-              "planner",
-            ),
-          );
-          return;
-        }
+        if (current.stage !== "scout") return;
         const wave = nextScoutWave(current.scoutItems, config?.parallel);
         if (!wave.length) {
-          persist(
-            goToStage(
-              { ...current, scoutNotes: compileScoutNotes(current.scoutItems, current.scoutNotes) },
-              "planner",
-            ),
-          );
+          const retry = retryableScouts(current.scoutItems);
+          if (retry.length) {
+            const ids = new Set(retry.map((item) => item.id));
+            run = persist({
+              ...current,
+              lastError: undefined,
+              scoutItems: (current.scoutItems ?? []).map((item) =>
+                ids.has(item.id) ? { ...item, status: "pending" as const, error: undefined } : item,
+              ),
+            });
+            continue;
+          }
+          if ((current.scoutItems ?? []).some((item) => item.status !== "done")) {
+            persist({
+              ...current,
+              lastError:
+                "Scouting is incomplete. Use /devteam status for details, /devteam continue to retry failed scouts, or /devteam skip to proceed without scouting.",
+            });
+          } else {
+            persist(
+              goToStage(
+                {
+                  ...current,
+                  scoutNotes: compileScoutNotes(current.scoutItems, current.scoutNotes),
+                },
+                "planner",
+              ),
+            );
+          }
           return;
         }
         await runScoutWave(ctx, current, wave);
@@ -780,10 +811,13 @@ export default function (pi: ExtensionAPI) {
     if (!answers) {
       const ui = ctx.ui as { select?: unknown; askDialog?: unknown } | undefined;
       if (!ctx.hasUI || (!ui?.select && !ui?.askDialog)) {
-        return applyCritiqueDecisions(
-          latest,
-          items.map((item) => ({ id: item.id, decision: "accept" as const })),
-        );
+        persist({
+          ...latest,
+          pipelineLocked: false,
+          lastError:
+            "Plan review requires explicit decisions. Resume in an interactive session or /devteam skip to keep the spec.",
+        });
+        return undefined;
       }
       haltWorkflow(ctx, latest);
       notify(
@@ -868,6 +902,16 @@ export default function (pi: ExtensionAPI) {
 
   async function advancePipeline(ctx: ExtensionContext, incoming: RunState) {
     if (advancing) return;
+    let claimed = false;
+    const existing = store.mutate((current) => {
+      if (current.pipelineOwner && current.pipelineOwner !== owner) return undefined;
+      claimed = true;
+      return { ...current, pipelineOwner: owner };
+    });
+    if (!claimed || !existing) {
+      notify(ctx, "devteam run is owned by another orchestrator.", "warning");
+      return;
+    }
     advancing = true;
     try {
       let run = incoming;
@@ -930,6 +974,16 @@ export default function (pi: ExtensionAPI) {
             await runDelegatedScouts(ctx, run);
             const afterScout = store.load();
             if (!afterScout || afterScout.halted) return;
+            if (afterScout.stage === "scout") {
+              applyParentTools(afterScout);
+              refreshUi(ctx, afterScout);
+              notify(
+                ctx,
+                afterScout.lastError ?? "devteam: scouting stalled. /devteam status for details.",
+                "warning",
+              );
+              return;
+            }
             run = afterScout;
             continue;
           }
@@ -986,6 +1040,9 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } finally {
+      store.mutate((current) =>
+        current.pipelineOwner === owner ? { ...current, pipelineOwner: undefined } : undefined,
+      );
       advancing = false;
       refreshUi(ctx, store.load());
     }
@@ -1243,7 +1300,7 @@ export default function (pi: ExtensionAPI) {
           let text = "No active /devteam run.";
           if (run) {
             try {
-              const paths = runPaths(agentDirSafe(), sessionId);
+              const paths = runPaths(agentDirSafe(), jobId);
               text = renderRunMarkdown(run, {
                 canonicalPath: paths.json,
                 aliasPath: paths.workflowStateJson,
@@ -1258,6 +1315,26 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (sub === "clear") {
+          const active = store.load();
+          if (
+            (active?.pipelineOwner && active.pipelineOwner !== owner) ||
+            (active?.pipelineLocked && !advancing)
+          ) {
+            notify(
+              ctx,
+              "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+              "warning",
+            );
+            return;
+          }
+          if (advancing) {
+            notify(
+              ctx,
+              "devteam is stopping. Wait for the current step to finish before clearing.",
+              "warning",
+            );
+            return;
+          }
           standDown(ctx);
           clearRunFiles(agentDirSafe(), jobId);
           persist(emptyRun(sessionId, "", jobId));
@@ -1267,6 +1344,18 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (sub === "stop") {
+          const active = store.load();
+          if (
+            (active?.pipelineOwner && active.pipelineOwner !== owner) ||
+            (active?.pipelineLocked && !advancing)
+          ) {
+            notify(
+              ctx,
+              "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+              "warning",
+            );
+            return;
+          }
           const run = store.load();
           standDown(ctx);
           abortParentTurn(ctx);
@@ -1274,7 +1363,7 @@ export default function (pi: ExtensionAPI) {
             if (ctx.hasUI) ctx.ui.notify("No /devteam run to stop.", "warning");
             return;
           }
-          persist(applyStop(run));
+          store.mutate?.(applyStop);
           applyParentTools(undefined);
           return;
         }
@@ -1296,6 +1385,17 @@ export default function (pi: ExtensionAPI) {
         }
 
         const run = store.load();
+        if (
+          (run?.pipelineOwner && run.pipelineOwner !== owner) ||
+          (run?.pipelineLocked && !advancing)
+        ) {
+          notify(
+            ctx,
+            "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+            "warning",
+          );
+          return;
+        }
 
         if (sub === "continue" && restText.toLowerCase() === "list") {
           await showJobList(ctx);
@@ -1368,9 +1468,10 @@ export default function (pi: ExtensionAPI) {
           abortAllChildren();
           abortParentTurn(ctx);
           resetDialogAbort();
-          const latest = store.load() ?? run;
-          const unlocked = { ...latest, pipelineLocked: false, pendingHandoff: undefined };
-          const next = applySkip(unlocked);
+          const next = store.mutate?.((latest) =>
+            applySkip({ ...latest, pipelineLocked: false, pendingHandoff: undefined }),
+          );
+          if (!next) return;
           if (
             next.stage === run.stage &&
             next.pauseReason === run.pauseReason &&
@@ -1378,7 +1479,6 @@ export default function (pi: ExtensionAPI) {
             next.wantMockup === run.wantMockup &&
             next.wantDemo === run.wantDemo
           ) {
-            persist(next);
             notify(
               ctx,
               run.halted
@@ -1387,7 +1487,6 @@ export default function (pi: ExtensionAPI) {
             );
             return;
           }
-          persist(next);
           notify(ctx, `Skipping: ${run.stage} → ${next.stage}.`);
           if (advancing) return;
           await advancePipeline(ctx, next);
@@ -1395,7 +1494,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         const task = trimmed;
-        if (run?.pipelineLocked) {
+        if (run?.pipelineLocked || advancing) {
           notify(ctx, "devteam is busy. /devteam stop first, or wait.", "warning");
           return;
         }
@@ -1412,6 +1511,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     try {
+      if (advancing) return;
       sessionId = sessionIdFromContext(ctx);
       jobId = readCurrentJobId(agentDirSafe(), sessionId) || sessionId;
       config = loadDevteamConfig(ctx.cwd, projectTrusted(ctx), PROJECT_CONFIG_DIRS);
@@ -1501,9 +1601,18 @@ export default function (pi: ExtensionAPI) {
     );
     const assigned =
       childRole === "scout" ? undefined : findItem(current?.workItems, childTaskId)?.files;
+    const demoDir = current ? runPaths(agentDirSafe(), current.jobId).demoDir : undefined;
     const writePath = isWriteTool(event.toolName) ? writePathFromInput(event.input) : undefined;
     if (writePath) {
-      const gate = gateWrite(role, writePath, ctx.cwd, config ?? undefined, service, assigned);
+      const gate = gateWrite(
+        role,
+        writePath,
+        ctx.cwd,
+        config ?? undefined,
+        service,
+        assigned,
+        demoDir,
+      );
       if (gate.block) return { block: true, reason: gate.reason };
     }
     if (isToolCallEventType("bash", event)) {
@@ -1512,6 +1621,7 @@ export default function (pi: ExtensionAPI) {
         event.input.command,
         config ?? undefined,
         current?.stack?.services,
+        demoDir,
       );
       if (gate.block) return { block: true, reason: gate.reason };
     }

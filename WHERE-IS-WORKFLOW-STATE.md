@@ -1,42 +1,20 @@
 # Where is `workflow_state`?
 
-It is **not** in this plugin folder. This directory is the installed package (extensions, skills, catalog). Run notebooks are written next to the Pi / Oh My Pi **agent** data, so they survive plugin reinstalls and never pollute the plugin cache.
+Run state lives in the Pi / Oh My Pi agent data directory, not the installed plugin folder. It survives plugin reinstalls and stays out of the plugin cache.
 
 ## Look here
 
-Oh My Pi:
+For Oh My Pi, the directory is `~/.omp/agent/devteam/`; for Pi, use `~/.pi/agent/devteam/` instead. Paths below are relative to that directory:
 
 ```text
-~/.omp/agent/devteam/workflow_state.json
-~/.omp/agent/devteam/workflow_state.md
+runs/<job-id>.json                 Canonical state for each job
+workflow_state.json                 Shared JSON alias of the last saved run
+workflow_state.md                   Shared readable rendering of the last saved run
+current.<session-id>                Current job ID for this session
+runs/<job-id>/demo/                 Demo scripts and screenshots
+runs/<job-id>/mockup/index.html    Mockup written by the mockup tool
 ```
 
-Pi:
+IDs in paths are sanitized. The aliases are shared across sessions and change when any run is saved; use the per-job JSON for a specific run. `/devteam status` prints the canonical path and alias path for the current run. The mockup command's fallback path uses `<session-id>` instead of `<job-id>` when no mockup path is stored.
 
-```text
-~/.pi/agent/devteam/workflow_state.json
-~/.pi/agent/devteam/workflow_state.md
-```
-
-Per-job copies (kept when you start a new task):
-
-```text
-~/.omp/agent/devteam/runs/<job-id>.json
-~/.omp/agent/devteam/current
-```
-
-`/devteam list` and `/devteam continue list` show these jobs. `/devteam continue 1` resumes the newest. `/devteam clear` deletes only the **current** job.
-
-Those files appear after you start a run with `/devteam <task>`. `/devteam status` prints the absolute paths.
-
-Mockups live beside the job file:
-
-```text
-~/.omp/agent/devteam/runs/<session-id>/mockup/index.html
-```
-
-Demo scripts and screenshots live next to them:
-
-```text
-~/.omp/agent/devteam/runs/<session-id>/demo/
-```
+`/devteam list` and `/devteam continue list` show up to 50 jobs ordered by most recently updated, not creation time; `/devteam continue 1` selects the first. `/devteam clear` refuses to clear an active or locked run. Otherwise it removes the current job's state and job-keyed artifact directory, then writes an empty idle state for that job; other job state is retained. The idle state is omitted from the job list.

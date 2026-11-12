@@ -45,15 +45,15 @@ Answer the planner's picker → review the critic → watch specialists build th
 
 | Step | What happens | Who |
 |------|--------------|-----|
-| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo. **Skipped** when the task already names a file (and the repo is not multi-service) | children |
+| **Scout** | Planner-orchestrator writes 2–4 scout items; read-only scouts map the repo. For non-multi-service projects, a named file or source path skips scouting; otherwise `@tiny` may decide to skip. Multi-service projects always scout | children |
 | **Plan** | Planner grills you (picker), writes spec; critic may pause for Accept / Reject | you + child |
 | **Design** | After the spec is approved, web+frontend jobs **ask** unless `wantMockup` was already set | you |
 | **Build** | Implementation orchestrator splits **this slice** into file-disjoint work items — **skipped** when there is one layer, or every needed layer already has `filesToChange`. `database` / `backend` / `frontend` / `general` children run in waves (cap 6). `dependsOn` is the only ordering — not a layer waterfall | children |
 | **Prove** | Reviewer on the **whole slice**, then tester, then linter. Pass/fail comes from **exit codes**, `[block]` findings, and (when those miss) `@tiny`. Each parks after 3 failed fix rounds until `/devteam continue`. Environment/transient bash failures park instead of sending implementors. Reviewer and fixer implementors use `@slow` | children |
-| **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Headed Playwright, then you accept or request changes (max 2 demos) | you + child |
+| **Demo** | After lint, web+frontend jobs **ask** unless `wantDemo` was already set. Best-effort headed Playwright, then you accept or request changes (max 2 demos) | you + child |
 | **Ship** | Drafts a conventional commit — *never commits* | child |
 
-Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo` with `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` for the commit draft). A child that exits without a handoff is inferred from the notebook first, then `@tiny`; if both miss, the job **stops**.
+Planner and designer stay in your session. Everyone else is an isolated child (`pi -a` / `omp --yolo` on trusted projects, with `@smol` scout/tester/linter, `@task` implementors/critics, `@slow` reviewer and fix rounds, `@commit` for the commit draft). For unassigned children without a handoff, completion is inferred from the notebook first, then `@tiny`; if both miss, the job stops. Assigned implementors must mark their item done with `implementor_done`; assigned scouts need saved findings. Assigned items do not use that inference fallback.
 
 ---
 
@@ -70,11 +70,21 @@ Planner and designer stay in your session. Everyone else is an isolated child (`
 | `/devteam stop` | Abort the current child / step |
 | `/devteam status` | Show notebook paths |
 | `/devteam mockup` | Open the HTML mockup |
-| `/devteam clear` | Wipe the current job |
+| `/devteam clear` | Clear current job state and its job artifact directory |
 
 At mockup or demo opt-in, answer **yes** or **no** in chat (or skip). Caps (review / test / lint / design-critic) park; continue and skip both proceed.
 
+Before clearing, back up any needed artifacts: clear removes the job's artifact directory recursively, including mockups, demo scripts, and screenshots.
+
+On POSIX, stopping a child sends SIGTERM to its process group and escalates to SIGKILL after two seconds. On Windows, termination covers the direct child only.
+
 `/devteam continue` stays on the current stage. It does not rewind from review, QA, or the commit draft. `/devteam retry` is the recovery for failed work items still stored on that job.
+
+Failed scouts retry automatically up to their cap; exhausted or interrupted work stays parked instead of advancing without research. Use `/devteam continue` to retry or `/devteam skip` to proceed without it. Plan critique requires an interactive decision; without a picker, resume with UI or skip to keep the existing spec.
+
+If a crash leaves a state `.lock` directory behind, stop all devteam processes before removing that directory. Lock timeouts fail closed to protect run state.
+
+If a run remains busy after a crash, stop all parent and child processes for that job and back up its canonical run JSON (shown by `/devteam status`, not the workflow-state alias). Remove `pipelineOwner`, set `pipelineLocked` to `false`, and use `/devteam continue <job-id>` to requeue interrupted items. Do not clear ownership while any job process is alive.
 
 ---
 
@@ -82,16 +92,19 @@ At mockup or demo opt-in, answer **yes** or **no** in chat (or skip). Caps (revi
 
 ```mermaid
 flowchart TD
-    A["/devteam task"] --> SK{task names a file?}
-    SK -->|yes · one service| P
-    SK -->|no| SO[Scout orchestrator]
+    A["/devteam task"] --> SK{multi-service?}
+    SK -->|yes| SO[Scout orchestrator]
+    SK -->|no| SF{file/path named or @tiny skips?}
+    SF -->|yes| P
+    SF -->|no| SO
     SO --> SC[Scouts · parallel]
     SC --> P[Planner · picker]
     P --> C[Plan critic]
     C -->|revise| PR[Plan review]
-    PR -->|accepted items| P
-    PR -->|keep spec| BI
-    C -->|approve| MU{web UI mockup?}
+    PR -->|accepted items| RE[Planner revises spec]
+    RE --> MU
+    PR -->|keep spec| MU
+    C -->|approve| MU{web frontend mockup?}
     MU -->|unset · ask| MO[Mockup opt-in]
     MO -->|yes| DS[Designer]
     MO -->|no| BI
@@ -112,15 +125,20 @@ flowchart TD
     T -->|pass or cap| L[Linter]
     L -->|fail| LF[Fix]
     LF --> L
-    L -->|pass or cap| Q{demo?}
-    Q -->|yes or ask| DM[Demo · Playwright]
+    L -->|pass or cap| Q{web frontend demo?}
+    Q -->|unset · ask| DO[Demo opt-in]
+    DO -->|yes| DM[Demo · Playwright]
+    DO -->|no| CM[Commit draft]
+    Q -->|already yes| DM
     DM --> DR[Demo review]
     DR -->|changes · max 2| P
-    DR -->|accept| CM[Commit draft]
+    DR -->|accept| CM
     Q -->|no| CM
 ```
 
 Design, review, test, and lint **park after their cap** (2 design rejects, 3 fix rounds). `/devteam continue` proceeds (design → implement, review → tester, test → lint, lint → demo or commit). `/devteam skip` does the same at those caps.
+
+Demo is best-effort: the service needs an agreed serve command, plus project-local Playwright and its browser already installed. On Linux without a display, the demo role uses `xvfb-run` if available; a virtual display is not visible on the user's screen. Missing prerequisites or a failed demo are recorded as notes, not pipeline failures.
 
 <details>
 <summary>Inside the build: specialists, not a layer factory</summary>
@@ -165,20 +183,6 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 - `parallel` — how many specialists may run at once when file lists do not collide (default 3, cap 6)
 - `maxToolCalls` / `childIdle` / `repeatToolAbort` — tune budgets
 
-<details>
-<summary>State locations & resolution</summary>
-
-```
-~/.pi/agent/devteam/runs/<job-id>.json          # Pi
-~/.omp/agent/devteam/workflow_state.json        # OMP
-~/.pi/agent/devteam/skill-cache/                # sparse clones
-```
-
-Each Pi session tracks its own current job. `/devteam status` prints paths. See `WHERE-IS-WORKFLOW-STATE.md`.
-
-Resolution: `devteam.json` → installed skills → sparse clone → warn + continue.
-
-</details>
 
 ---
 
@@ -188,7 +192,7 @@ Bundled: `implement` + `tdd`. Plus official stacks (React, Vue, Angular, React N
 
 Progress: one-line widget `step · role · 1:23` + 40-line transcript blocks per role.
 
-Budgets: `200` calls for builders/review/test/lint/demo, `40` scouts, `80` specialists; `childIdle 480s`, `repeatToolAbort 8`.
+Default tool-call budgets: `200` for database/backend/frontend/general implementors, reviewer, tester, linter, and demo; `40` for scouts; `80` for other isolated roles. `childIdle` defaults to `480s`, `repeatToolAbort` to `8`.
 
 ---
 
@@ -197,11 +201,16 @@ Budgets: `200` calls for builders/review/test/lint/demo, `40` scouts, `80` speci
 | Role | Can |
 |------|-----|
 | Planner / Critics / Reviewer | Read-only |
-| Designer | `devteam_mockup` only |
+| Designer | Planner's read, search, bash, ask, state and handoff tools, plus `devteam_mockup`; no repository edits |
 | Implementors | Edit tree, no `.env`/keys, no `git commit`, no `rm -rf` / git rewrite / package installs / curl / sudo |
 | Demo | `serve` + Playwright, writes `demo/` only |
 
 Optional per-layer `paths` globs further restrict writes.
+
+These checks are guardrails, not a security sandbox: shell commands and project scripts can perform actions beyond the tool-level restrictions. Run only trusted projects and agents with appropriate OS permissions.
+
+Trust is host-provided: if the trust API is unavailable or throws (including on hosts without it), the extension assumes trusted. OMP children may then run with `--yolo`; use only trusted projects.
+
 
 ---
 
@@ -229,10 +238,12 @@ OMP children use `PI_SUBPROCESS_CMD` / `omp --yolo` + `DEVTEAM_ROLE`.
 
 ## ✅ Tests
 
+Development tooling requires Node `^22.18.0 || ^24.11.0 || >=26.0.0` for Vite+. The extension itself supports Node 22+.
+
 ```bash
 npm test          # unit + e2e harness, no Pi needed
-npm run lint      # oxlint
-npm run fmt:check # oxfmt (fix: npm run fmt)
+npm run lint      # Vite+ lint (Oxlint)
+npm run fmt:check # Vite+ format check (fix: npm run fmt)
 ```
 
 Covers: permissions, per-session state, teardown, slice waves, review-once, fail-closed handoffs, block vs note, stack detection, model tiers, transcript caps.

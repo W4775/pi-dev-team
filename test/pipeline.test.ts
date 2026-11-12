@@ -20,6 +20,7 @@ import {
   nextAfterPlanCritic,
   parseLayers,
   proceedAfterLint,
+  reviewScope,
   shouldOfferMockup,
   neededImplementors,
   shouldSkipImplementationOrchestrator,
@@ -209,6 +210,32 @@ test("demo review accept finishes, changes loop to planner, cap commits", () => 
   assert.equal(applySkip(run(review)).stage, "commit_message");
 });
 
+test("demo rejection replans instead of reusing completed work or critic decisions", () => {
+  const rejected = applyDemoReview(
+    run({
+      stage: "demo_review",
+      demoRound: 1,
+      layersNeeded: ["backend"],
+      planCritique: { notes: "old critique", replacedScope: false, reviewed: true },
+      workItems: [workItem({ id: "old", status: "done" })],
+      fixRound: { review: 3, test: 2, lint: 1 },
+      commitMessageDraft: "old draft",
+    }),
+    false,
+    "change behavior",
+  );
+  assert.equal(rejected.planCritique, undefined);
+  assert.equal(rejected.workItems, undefined);
+  assert.deepEqual(rejected.fixRound, { review: 0, test: 0, lint: 0 });
+  assert.equal(rejected.commitMessageDraft, undefined);
+  const critic = applyHandoff(rejected, "plan_ready");
+  assert.equal(critic.stage, "plan_critic");
+  const implemented = applyHandoff(critic, "critic_approve");
+  assert.equal(implemented.stage, "implement");
+  assert.equal(implemented.workItems?.[0]?.status, "pending");
+  assert.notEqual(implemented.workItems?.[0]?.id, "old");
+});
+
 test("skip at the leftover build-it gate starts implementation", () => {
   const paused = run({
     stage: "build_it_pause",
@@ -242,6 +269,71 @@ test("attaching a job for resume keeps stage and spec", () => {
   assert.equal(next.spec, "Ship settings page");
   assert.equal(next.pipelineLocked, false);
   assert.equal(next.interactiveRole, "planner");
+});
+
+test("resume requeues interrupted work and scouts without changing completed items", () => {
+  const resumed = attachRunForResume(
+    run({
+      stage: "implement",
+      pipelineLocked: true,
+      workItems: [
+        workItem({ id: "active", status: "running", attempts: 1 }),
+        workItem({ id: "done", status: "done" }),
+      ],
+      scoutItems: [
+        { id: "active", title: "active", files: [], status: "running", attempts: 1 },
+        { id: "done", title: "done", files: [], status: "done", attempts: 1 },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    resumed.workItems?.map((item) => item.status),
+    ["pending", "done"],
+  );
+  assert.deepEqual(
+    resumed.scoutItems?.map((item) => item.status),
+    ["pending", "done"],
+  );
+  assert.equal(resumed.workItems?.[0]?.attempts, 1);
+});
+
+test("continue requeues interrupted work and scouts after stop", () => {
+  const stopped = applyStop(
+    run({
+      stage: "implement",
+      workItems: [workItem({ id: "active", status: "running", attempts: 1 })],
+      scoutItems: [{ id: "scout", title: "scout", files: [], status: "running", attempts: 1 }],
+    }),
+  );
+  const resumed = applyContinue(stopped);
+  assert.equal(resumed.halted, false);
+  assert.equal(resumed.workItems?.[0]?.status, "pending");
+  assert.equal(resumed.scoutItems?.[0]?.status, "pending");
+  assert.equal(resumed.workItems?.[0]?.attempts, 1);
+});
+
+test("continue retries failed scouts even after the automatic attempt cap", () => {
+  const resumed = applyContinue(
+    run({
+      stage: "scout",
+      scoutItems: [
+        {
+          id: "failed",
+          title: "failed",
+          files: [],
+          status: "failed",
+          attempts: MAX_WORK_ITEM_ATTEMPTS,
+          error: "failed",
+        },
+        { id: "done", title: "done", files: [], status: "done", attempts: 1, findings: "found" },
+      ],
+    }),
+  );
+  assert.equal(resumed.stage, "scout");
+  assert.equal(resumed.scoutItems?.[0]?.status, "pending");
+  assert.equal(resumed.scoutItems?.[0]?.attempts, MAX_WORK_ITEM_ATTEMPTS);
+  assert.equal(resumed.scoutItems?.[0]?.error, undefined);
+  assert.equal(resumed.scoutItems?.[1]?.status, "done");
 });
 
 test("continue after error retries the failed role", () => {
@@ -368,6 +460,18 @@ test("critic revise pauses for the user instead of looping the planner", () => {
   assert.equal(next.planCritique?.items?.[0]?.title, "Empty state");
 });
 
+test("critic revision without findings remains retryable until explicitly skipped", () => {
+  const critic = run({
+    stage: "plan_critic",
+    currentRole: "plan_critic",
+    layersNeeded: ["backend"],
+  });
+  const rejected = applyHandoff(critic, "critic_revise");
+  assert.equal(rejected.stage, "plan_critic");
+  assert.match(rejected.lastError ?? "", /without any critique/);
+  assert.equal(applySkip(rejected).stage, "implement");
+});
+
 test("accepting critic items sends the planner a filtered list; rejecting all starts implementation", () => {
   const reviewing = applyHandoff(
     run({
@@ -483,7 +587,7 @@ test("empty layers needed routes to general only", () => {
   assert.deepEqual(next.implementorQueue, ["general"]);
 });
 
-test("needed implementors skip layers with no work", () => {
+test("needed implementors retain listed layers with incomplete briefs", () => {
   assert.deepEqual(neededImplementors(run({ layersNeeded: ["backend"] })), ["backend"]);
   assert.deepEqual(neededImplementors(run({ layersNeeded: ["frontend", "database", "backend"] })), [
     "database",
@@ -497,7 +601,7 @@ test("needed implementors skip layers with no work", () => {
         filesToChange: { backend: ["src/api.ts"] },
       }),
     ),
-    ["backend"],
+    ["database", "backend", "frontend"],
   );
   assert.deepEqual(
     neededImplementors(
@@ -506,7 +610,7 @@ test("needed implementors skip layers with no work", () => {
         backendNotes: "Add POST /settings",
       }),
     ),
-    ["backend"],
+    ["database", "backend", "frontend"],
   );
   assert.deepEqual(
     neededImplementors(
@@ -733,6 +837,37 @@ test("qa_fail fix round stays on the reviewed layer", () => {
   assert.equal(next.reviewLayer, "backend");
 });
 
+test("review retries assess the whole slice after fixing one layer", () => {
+  const reviewed = run({
+    stage: "reviewer",
+    layersNeeded: ["backend", "frontend"],
+    workItems: [
+      workItem({ id: "api", status: "done", files: ["src/api.ts"] }),
+      workItem({ id: "ui", status: "done", layer: "frontend", files: ["src/ui.tsx"] }),
+    ],
+    reviewFindings: [{ axis: "spec", severity: "block", text: "api", files: ["src/api.ts"] }],
+  });
+  const fix = applyHandoff(reviewed, "qa_fail");
+  assert.equal(fix.stage, "fix_review");
+  const retry = applyHandoff(fix, "implementor_done");
+  assert.equal(retry.stage, "reviewer");
+  assert.equal(retry.reviewLayer, undefined);
+  assert.deepEqual(reviewScope(retry).reviewFiles, ["src/api.ts", "src/ui.tsx"]);
+});
+
+test("commit handoff requires a nonblank draft at commit stage", () => {
+  for (const draft of [undefined, "", "  "]) {
+    const current = run({ stage: "commit_message", commitMessageDraft: draft });
+    const next = applyHandoff(current, "commit_drafted");
+    assert.equal(next.stage, "commit_message");
+    assert.match(next.lastError ?? "", /commit message draft/);
+  }
+  assert.equal(
+    applyHandoff(run({ stage: "reviewer", commitMessageDraft: "feat: x" }), "commit_drafted").stage,
+    "reviewer",
+  );
+});
+
 test("blocked files map to implementor layers in pipeline order", () => {
   const layers = mapBlockedFilesToImplementors(
     ["src/components/Page.tsx", "prisma/schema.prisma", "src/server/api.ts"],
@@ -748,7 +883,7 @@ test("qa_pass reviewer → tester → linter → commit message", () => {
   assert.equal(l.stage, "linter");
   const c = applyHandoff(l, "qa_pass");
   assert.equal(c.stage, "commit_message");
-  const done = applyHandoff(c, "commit_drafted");
+  const done = applyHandoff({ ...c, commitMessageDraft: "feat: ship" }, "commit_drafted");
   assert.equal(done.stage, "done");
 });
 
@@ -957,7 +1092,9 @@ test("continue retries failed work items; skip sends them to review", () => {
     ...failed,
     workItems: failed.workItems?.map((item) => ({ ...item, attempts: 2 })),
   });
-  assert.equal(exhausted.stage, "reviewer");
+  assert.equal(exhausted.stage, "implement");
+  assert.equal(applyContinue(exhausted).stage, "implement");
+  assert.equal(applySkip(exhausted).stage, "reviewer");
 });
 
 test("retry one failed item from commit_message", () => {

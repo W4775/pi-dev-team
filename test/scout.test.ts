@@ -59,3 +59,35 @@ test("compileScoutNotes uses item findings, even on retry", () => {
   assert.match(compileScoutNotes(items, "already written"), /src\/app\/settings/);
   assert.equal(compileScoutNotes([], "already written"), "already written");
 });
+
+test("compileScoutNotes excludes failed and incomplete findings without reviving stale notes", () => {
+  const items = [
+    {
+      id: "a",
+      title: "Success",
+      files: [],
+      status: "done" as const,
+      attempts: 1,
+      findings: "verified fact",
+    },
+    {
+      id: "b",
+      title: "Failed",
+      files: [],
+      status: "failed" as const,
+      attempts: 1,
+      findings: "stale fact",
+      error: "scout crashed",
+    },
+    {
+      id: "c",
+      title: "Incomplete",
+      files: [],
+      status: "running" as const,
+      attempts: 1,
+      findings: "unverified fact",
+    },
+  ];
+  assert.equal(compileScoutNotes(items, "old notes"), "### Success (a)\nverified fact");
+  assert.equal(compileScoutNotes(items.slice(1), "old notes"), "");
+});

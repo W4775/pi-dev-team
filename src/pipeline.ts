@@ -9,7 +9,7 @@ import {
   normalizeWorkItems,
   retryableItems,
 } from "./work.ts";
-import { compileScoutNotes, retryableScouts } from "./scout.ts";
+import { compileScoutNotes } from "./scout.ts";
 import { formatCritiqueForPlanner, parseCritiqueItems, rejectUndecided } from "./critique.ts";
 import type {
   CritiqueItem,
@@ -64,10 +64,7 @@ function layersFromNotes(
   return IMPLEMENTOR_LAYERS.filter((layer) => Boolean(layerNote(run, layer)?.trim()));
 }
 
-/**
- * Layers this change actually needs. Empty notes/files for a layer mean skip
- * that implementor, even if the repo has that stack.
- */
+/** Explicitly listed layers remain needed even when their briefs are incomplete. */
 export function implementorAllowList(
   run: Pick<
     RunState,
@@ -83,12 +80,7 @@ export function implementorAllowList(
   const fromNotes = layersFromNotes(run);
   const fromFiles = layersFromFiles(run.filesToChange);
   const briefed = orderedLayers([...fromNotes, ...fromFiles]);
-  if (briefed.length && listed.length) {
-    const both = orderedLayers(briefed.filter((layer) => listed.includes(layer)));
-    return both.length ? both : briefed;
-  }
-  if (briefed.length) return briefed;
-  return orderedLayers(listed);
+  return listed.length ? orderedLayers(listed) : briefed;
 }
 
 /** Queue of implementors to spawn. Falls back to general only when nothing was specified. */
@@ -195,7 +187,7 @@ export function autoResumeGate(run: RunState): RunState {
     failedItems(run.workItems).length &&
     !itemsRemaining(run.workItems).length
   ) {
-    return retryableItems(run.workItems).length ? applyContinue(run) : applySkip(run);
+    return retryableItems(run.workItems).length ? applyContinue(run) : run;
   }
   return run;
 }
@@ -549,6 +541,12 @@ export function attachRunForResume(run: RunState): RunState {
   return stamp(run, {
     pipelineLocked: false,
     pendingHandoff: undefined,
+    workItems: run.workItems?.map((item) =>
+      item.status === "running" ? { ...item, status: "pending" } : item,
+    ),
+    scoutItems: run.scoutItems?.map((item) =>
+      item.status === "running" ? { ...item, status: "pending" } : item,
+    ),
     lastError: undefined,
     interactiveRole,
     currentRole: run.currentRole ?? interactiveRole,
@@ -580,7 +578,7 @@ export function continueHint(run: RunState): string {
   if (run.stage === "implement" && failedItems(run.workItems).length) {
     return retryableItems(run.workItems).length
       ? "A work item failed. /devteam continue retries it; /devteam skip sends remaining work to the reviewer."
-      : "Work items failed twice. /devteam continue or /devteam skip sends this slice to the reviewer.";
+      : "Work items failed twice. /devteam retry reopens them; /devteam skip sends this slice to the reviewer.";
   }
   if (run.stage === "planner" && !run.spec?.trim()) {
     return "Planner is still in this chat. Answer with the ask picker until a spec is stored, then it will hand off to the plan critic.";
@@ -606,7 +604,11 @@ export function continueHint(run: RunState): string {
 export function applyContinue(run: RunState): RunState {
   if (run.pipelineLocked) return run;
   const current = run.halted
-    ? stamp(run, { halted: false, lastError: undefined, currentStatus: undefined })
+    ? stamp(attachRunForResume(run), {
+        halted: false,
+        lastError: undefined,
+        currentStatus: undefined,
+      })
     : run;
 
   if (current.pauseReason === "fix_review_max") {
@@ -653,13 +655,12 @@ export function applyContinue(run: RunState): RunState {
     return stamp(current, { lastError: undefined });
   }
 
-  if (current.stage === "scout" && retryableScouts(current.scoutItems).length) {
-    const ids = new Set(retryableScouts(current.scoutItems).map((item) => item.id));
+  if (current.stage === "scout" && current.scoutItems?.some((item) => item.status === "failed")) {
     return stamp(current, {
       pipelineLocked: false,
       lastError: undefined,
       scoutItems: (current.scoutItems ?? []).map((item) =>
-        ids.has(item.id) ? { ...item, status: "pending", error: undefined } : item,
+        item.status === "failed" ? { ...item, status: "pending", error: undefined } : item,
       ),
     });
   }
@@ -679,9 +680,7 @@ export function applyContinue(run: RunState): RunState {
         ),
       });
     }
-    if (failedItems(current.workItems).length) {
-      return enterReview(current);
-    }
+    if (failedItems(current.workItems).length) return current;
   }
 
   if (current.stage === "error") {
@@ -810,7 +809,15 @@ export function applyDemoReview(run: RunState, accepted: boolean, feedback?: str
     });
   }
   return goToStage(
-    stamp(run, { pauseReason: undefined, demoFeedback: feedback?.trim() || undefined }),
+    stamp(run, {
+      pauseReason: undefined,
+      demoFeedback: feedback?.trim() || undefined,
+      planCritique: undefined,
+      workItems: undefined,
+      reviewLayer: undefined,
+      fixRound: { review: 0, test: 0, lint: 0 },
+      commitMessageDraft: undefined,
+    }),
     "planner",
   );
 }
@@ -897,7 +904,6 @@ function startFix(
     implementorQueue: queue,
     implementorIndex: 0,
     currentRole: queue[0],
-    reviewLayer: kind === "review" ? (run.reviewLayer ?? layer) : run.reviewLayer,
     fixRound: { ...run.fixRound, [kind]: run.fixRound[kind] + 1 },
     pauseReason: undefined,
     serviceQueue,
@@ -956,7 +962,14 @@ export function applyHandoff(
 
     case "critic_revise":
       if (cleared.stage === "plan_critic" || cleared.currentRole === "plan_critic") {
-        return goToStage(stampCritique(cleared, critiqueItems(cleared), false), "plan_review");
+        const items = critiqueItems(cleared);
+        if (!items.length) {
+          return stamp(cleared, {
+            pipelineLocked: false,
+            lastError: "Plan critic requested revisions without any critique items.",
+          });
+        }
+        return goToStage(stampCritique(cleared, items, false), "plan_review");
       }
       if (cleared.stage === "design_critic" || cleared.currentRole === "design_critic") {
         const rejects = cleared.designRejectCount + 1;
@@ -1030,7 +1043,9 @@ export function applyHandoff(
       }
       const more = nextService(cleared);
       if (more) return more;
-      if (cleared.stage === "fix_review") return advanceQueue(cleared, "reviewer");
+      if (cleared.stage === "fix_review") {
+        return advanceQueue(stamp(cleared, { reviewLayer: undefined }), "reviewer");
+      }
       if (cleared.stage === "fix_test") return advanceQueue(cleared, "tester");
       if (cleared.stage === "fix_lint") return advanceQueue(cleared, "linter");
       if (cleared.stage === "implement") {
@@ -1114,6 +1129,12 @@ export function applyHandoff(
     }
 
     case "commit_drafted":
+      if (cleared.stage !== "commit_message" || !cleared.commitMessageDraft?.trim()) {
+        return stamp(cleared, {
+          pipelineLocked: false,
+          lastError: "Cannot complete without a commit message draft.",
+        });
+      }
       return goToStage(cleared, "done", { currentRole: undefined, interactiveRole: undefined });
 
     default:

@@ -83,7 +83,13 @@ export function toolsForRole(role: IsolatedRole): string[] {
   }
   if (role === "orchestrator" || role === "planner_orchestrator")
     return [...READ_TOOL_NAMES, ...custom];
-  if (role === "database" || role === "backend" || role === "frontend" || role === "general") {
+  if (
+    role === "demo" ||
+    role === "database" ||
+    role === "backend" ||
+    role === "frontend" ||
+    role === "general"
+  ) {
     return [...READ_TOOL_NAMES, "edit", "write", ...custom];
   }
   return [...READ_TOOL_NAMES, ...custom];

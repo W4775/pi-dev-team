@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { matchAnyGlob } from "./glob.ts";
 import { withStateLock } from "./lock.ts";
@@ -111,7 +112,7 @@ export function readCurrentJobId(agentDir: string, sessionId?: string): string |
 
 export function writeCurrentJobId(agentDir: string, jobId: string, sessionId?: string): void {
   mkdirSync(join(agentDir, "devteam"), { recursive: true });
-  writeFileSync(currentJobPointerPath(agentDir, sessionId), `${jobId}\n`);
+  atomicWrite(currentJobPointerPath(agentDir, sessionId), `${jobId}\n`);
 }
 export function workflowStatePaths(agentDir: string) {
   const dir = join(agentDir, "devteam");
@@ -156,8 +157,7 @@ export function normalizeStack(raw: unknown, fallbackUi?: UiSurface): StackDetec
   };
 }
 
-export function loadRun(path: string): RunState | undefined {
-  if (!existsSync(path)) return undefined;
+function readRun(path: string): RunState | undefined {
   try {
     const run = JSON.parse(readFileSync(path, "utf8")) as RunState;
     if (run.stack) run.stack = normalizeStack(run.stack, run.uiSurface) ?? run.stack;
@@ -168,21 +168,39 @@ export function loadRun(path: string): RunState | undefined {
     if (run.scoutItems) run.scoutItems = normalizeScoutItems(run.scoutItems);
     if (!run.jobId) run.jobId = basename(path, ".json") || run.sessionId || "session";
     return run;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+export function loadRun(path: string): RunState | undefined {
+  try {
+    return readRun(path);
   } catch {
     return undefined;
   }
 }
 
-export function saveRun(path: string, run: RunState, agentDir?: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+function atomicWrite(path: string, contents: string): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, contents, { flag: "wx" });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function saveRunUnlocked(path: string, run: RunState, agentDir?: string): void {
   run.updatedAt = new Date().toISOString();
   const json = `${JSON.stringify(run, null, 2)}\n`;
-  writeFileSync(path, json);
+  atomicWrite(path, json);
   if (agentDir) {
     const aliases = workflowStatePaths(agentDir);
     mkdirSync(dirname(aliases.json), { recursive: true });
-    writeFileSync(aliases.json, json);
-    writeFileSync(
+    atomicWrite(aliases.json, json);
+    atomicWrite(
       aliases.md,
       `${renderRunMarkdown(run, { canonicalPath: path, aliasPath: aliases.json })}\n`,
     );
@@ -190,35 +208,51 @@ export function saveRun(path: string, run: RunState, agentDir?: string): void {
   }
 }
 
+export function saveRun(path: string, run: RunState, agentDir?: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  withStateLock(path, () => {
+    if (agentDir) {
+      mkdirSync(dirname(workflowStatePaths(agentDir).json), { recursive: true });
+      withStateLock(workflowStatePaths(agentDir).json, () => saveRunUnlocked(path, run, agentDir));
+    } else saveRunUnlocked(path, run);
+  });
+}
+
 export function mutateRun(
   path: string,
   agentDir: string | undefined,
   change: (run: RunState) => RunState | undefined,
 ): RunState | undefined {
+  mkdirSync(dirname(path), { recursive: true });
   return withStateLock(path, () => {
-    const current = loadRun(path);
+    const current = readRun(path);
     if (!current) return undefined;
     const next = change(current);
     if (!next) return current;
-    saveRun(path, next, agentDir);
+    if (agentDir) {
+      mkdirSync(dirname(workflowStatePaths(agentDir).json), { recursive: true });
+      withStateLock(workflowStatePaths(agentDir).json, () => saveRunUnlocked(path, next, agentDir));
+    } else saveRunUnlocked(path, next);
     return next;
   });
 }
 
 export function clearRunFiles(agentDir: string, sessionId: string): void {
   const paths = runPaths(agentDir, sessionId);
-  for (const file of [paths.json, paths.workflowStateJson, paths.workflowStateMd]) {
-    try {
-      rmSync(file, { force: true });
-    } catch {
-      /* ignore */
-    }
-  }
-  try {
-    rmSync(dirname(paths.mockupDir), { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
+  mkdirSync(dirname(paths.json), { recursive: true });
+  withStateLock(paths.json, () => {
+    mkdirSync(dirname(paths.workflowStateJson), { recursive: true });
+    withStateLock(paths.workflowStateJson, () => {
+      const run = readRun(paths.json);
+      const alias = loadRun(paths.workflowStateJson);
+      rmSync(paths.json, { force: true });
+      if (run && alias?.jobId === run.jobId) {
+        rmSync(paths.workflowStateJson, { force: true });
+        rmSync(paths.workflowStateMd, { force: true });
+      }
+      rmSync(dirname(paths.mockupDir), { recursive: true, force: true });
+    });
+  });
 }
 
 export function getSection(run: RunState, section: StateSection): unknown {
