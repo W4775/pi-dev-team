@@ -111,6 +111,7 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 
 - `skills` — stack skills for each kind of work; see `catalog/stacks.json` for available IDs.
 - `services` — override detected services and their commands.
+- `bash.test` — extra trusted tester command prefixes, including project-specific build or verification commands; service `test` commands also authorize their segments.
 - `models` — choose a model for each role. Pi uses the session model.
 - `parallel` — maximum number of independent specialists running at once (default 3, maximum 6).
 - `maxToolCalls`, `childIdle`, `repeatToolAbort` — adjust agent limits.
@@ -132,8 +133,10 @@ The plugin includes development workflow skills and can use stack-specific skill
 | Designer | Read files and create mockups; do not edit application code |
 | Implementors | Edit project files; restricted from secrets, commits, destructive Git operations, and package installs |
 | Demo | Run the configured app and Playwright; write demo artifacts |
+| Tester | Run common test runners, Node's `node --test`, package-manager `run build`, and configured test commands |
 
 Optional per-layer `paths` globs further restrict writes.
+Tester command checks do not derive permissions from spec prose. Configure other commands in `bash.test` or a service's `test` list. Arguments may follow an allowed prefix; shell pipes, redirections, substitutions, and background commands are blocked for testers. Configure only trusted commands: tests, build scripts, runner options, and configured prefixes can execute project code.
 
 These checks are guardrails, not a security sandbox: shell commands and project scripts can perform actions beyond the tool-level restrictions. Run only trusted projects and agents with appropriate OS permissions.
 

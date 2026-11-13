@@ -212,8 +212,14 @@ function isInspectSegment(part: string): boolean {
 
 function isTestRunner(part: string): boolean {
   if (isCdOnly(part)) return true;
+  if (/^node\s+--test(?:\s|$)/.test(part)) {
+    return !/\s(?:--(?:eval|print|require|import|loader|experimental-loader|run)(?:=|\s|$)|-[epr](?:\S*|$))/.test(
+      part,
+    );
+  }
   if (/^(pytest|vitest|jest)\b/.test(part)) return true;
   if (/^(npm|pnpm|yarn|bun)\s+(test|run\s+test)\b/.test(part)) return true;
+  if (/^(npm|pnpm|yarn|bun)\s+run\s+build(?:\s|$)/.test(part)) return true;
   return /^(go\s+test|cargo\s+test|dotnet\s+test)\b/.test(part);
 }
 
@@ -280,11 +286,15 @@ export function gateBash(
   }
 
   if (role === "tester") {
+    // Do not let an allowed runner hide a second shell command or substitution.
+    if (/[|&<>$`]/.test(cmd.replace(/&&|\|\|/g, ""))) {
+      return { block: true, reason: "Tester may only run the agreed test commands." };
+    }
     const allow = [
       ...DEFAULT_TEST_BASH,
       ...(config?.bash?.test ?? []),
       ...serviceCommands(services, "test"),
-    ];
+    ].flatMap(commandSegments);
     if (!everySegmentAllowed(cmd, allow, isTestRunner)) {
       return { block: true, reason: "Tester may only run the agreed test commands." };
     }

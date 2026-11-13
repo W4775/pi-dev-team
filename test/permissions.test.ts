@@ -81,6 +81,51 @@ test("tester may run test runners", () => {
   assert.equal(gateBash("tester", "git commit -m x", undefined).block, true);
 });
 
+test("tester can run node tests and build scripts without arbitrary shell commands", () => {
+  for (const command of [
+    "node --test tests/cli/registry-build.test.mjs",
+    "node --test tests/integration/catalog-discovery.test.mjs",
+    "node --test --test-name-pattern='catalog discovery' --test-reporter=spec tests/*.test.mjs",
+    "cd packages/cli && node --test --test-concurrency=1 tests/cli.test.mjs",
+    "npm run build",
+    "pnpm run build -- --mode production",
+  ])
+    assert.equal(gateBash("tester", command, undefined).block, false, command);
+  for (const command of [
+    "node -e 'console.log(1)'",
+    "node --test --eval 'console.log(1)'",
+    "node --test --import ./arbitrary.mjs",
+    "npm run build-other",
+    "npm run build && rm -rf dist",
+    "npm run build | sh",
+    "npm run build $(touch /tmp/marker)",
+    "npm run build > output",
+  ])
+    assert.equal(gateBash("tester", command, undefined).block, true, command);
+});
+
+test("tester accepts configured and service test commands, not arbitrary spec text", () => {
+  const config = { bash: { test: ["npm run verify", "cd api && npm run integration"] } };
+  const services = [
+    {
+      name: "api",
+      root: "api",
+      layer: "backend" as const,
+      languages: ["node"],
+      paths: ["api/**"],
+      skills: [],
+      test: ["npm run check"],
+      lint: [],
+      serve: [],
+      source: "config" as const,
+    },
+  ];
+  assert.equal(gateBash("tester", "npm run verify -- --ci", config).block, false);
+  assert.equal(gateBash("tester", "cd api && npm run integration -- --ci", config).block, false);
+  assert.equal(gateBash("tester", "cd api && npm run check", undefined, services).block, false);
+  assert.equal(gateBash("tester", "npm run deploy", undefined, services).block, true);
+});
+
 test("linter may run lint commands", () => {
   assert.equal(gateBash("linter", "npm run lint", undefined).block, false);
   assert.equal(gateBash("linter", "ruff check .", undefined).block, false);

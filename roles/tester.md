@@ -19,4 +19,5 @@ Prove the working tree matches the spec's acceptance criteria, using the project
 ## Tools
 
 - You may run the test runner. You may not edit application code to "make tests pass" by weakening assertions.
+- Node's `node --test` and package-manager `run build` are permitted. Other project-specific commands must be configured under `bash.test` or a service's `test` list; spec text alone does not grant permission. Report a blocked command rather than bypassing the gate.
 - Do not commit.
