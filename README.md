@@ -26,6 +26,9 @@ pi install https://github.com/W4775/pi-dev-team
 omp plugin install github:W4775/pi-dev-team
 ```
 
+For a local OMP checkout, load the package directory (`omp -e /path/to/pi-dev-team`),
+not `src/index.ts`: OMP discovers packaged agent definitions from directory roots.
+
 Then in any Pi/OMP session:
 
 ```text
@@ -78,7 +81,7 @@ Before clearing, back up needed artifacts: `/devteam clear` removes the job's ar
 - Plan critique requires an interactive decision. Without a picker, resume with UI or skip to keep the existing spec.
 - On Windows, stopping a child terminates only the direct child; descendants may need manual cleanup.
 - If a crash leaves a state `.lock` directory behind, stop all devteam processes before removing it. Lock timeouts fail closed to protect run state.
-- If a run remains busy after a crash, stop all parent and child processes for that job. Back up its canonical run JSON (shown by `/devteam status`, not the workflow-state alias), remove `pipelineOwner`, set `pipelineLocked` to `false`, and use `/devteam continue <job-id>` to requeue interrupted items. Never clear ownership while any job process is alive.
+- For interrupted native work, verify every previous host, worker, and subprocess has stopped before `/devteam continue <job-id>`. If ownership is unknown, interactive confirmation is required; continuing while any writer remains active risks simultaneous edits and data loss. Known live owners are not recovered. Headless sessions cannot confirm recovery. Other locked stages still require manual investigation.
 
 See [Where is workflow state?](WHERE-IS-WORKFLOW-STATE.md) for job files and artifacts.
 

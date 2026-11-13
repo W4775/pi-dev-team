@@ -17,6 +17,7 @@
   "type": "module",
   "files": [
     "src",
+    "agents",
     "roles",
     "skills",
     "catalog",

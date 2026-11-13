@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
@@ -43,7 +43,7 @@ function createHost() {
   const notifications: string[] = [];
   let activeTools: string[] = [];
 
-  const builtins = ["read", "grep", "find", "ls", "glob", "bash", "ask"].map((name) => ({
+  const builtins = ["read", "grep", "find", "ls", "glob", "bash", "ask", "task"].map((name) => ({
     name,
     execute: async () => ({ content: [{ type: "text", text: name }] }),
   }));
@@ -89,7 +89,7 @@ function createHost() {
   };
 
   function emit(event: string, payload: unknown, ctx: unknown) {
-    for (const handler of listeners.get(event) ?? []) handler(payload, ctx);
+    return (listeners.get(event) ?? []).map((handler) => handler(payload, ctx));
   }
 
   return { pi, tools, commands, messages, notifications, emit };
@@ -102,6 +102,9 @@ function createContext(cwd: string, notifications: string[]) {
     ui: {
       notify(text: string) {
         notifications.push(text);
+      },
+      async confirm(_title: string, _message: string) {
+        return false;
       },
       setWidget() {},
       setStatus() {},
@@ -370,4 +373,442 @@ test("headless plan review does not accept critic suggestions", async () => {
   assert.equal(result.stage, "plan_review");
   assert.notEqual(result.planCritique?.items?.[0]?.decision, "accept");
   assert.match(result.lastError ?? "", /explicit decisions/i);
+});
+
+test("native assignment claims bind one active attempt to its actual agent", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-"));
+  const { ctx, agentDir } = await bootDevteam(root);
+  const token = "01234567-89ab-cdef-0123-456789abcdef";
+  const run = {
+    ...emptyRun("parent", "task", "native1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    pipelineLocked: true,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "running" as const,
+        attempts: 1,
+        native: { token, attempt: 1, parentId: "Main", expectedAgentId: "Worker-2" },
+      },
+    ],
+  };
+  saveRun(runPaths(agentDir, run.jobId).json, run, agentDir);
+  // Load after registering the test-only host module loader.
+  const { default: activate } = await import("../src/index.ts");
+  const worker = createHost();
+  activate(worker.pi);
+  const workerCtx = {
+    ...ctx,
+    agent: { kind: "sub", name: "devteam-implementor", id: "Worker-2", parentId: "Main" },
+  };
+  worker.emit("session_start", {}, workerCtx);
+  const bind = worker.tools.get("devteam_bind")!;
+  await assert.rejects(
+    bind.execute("bad", { jobId: "../native1", token }, undefined, undefined, workerCtx),
+  );
+  await bind.execute("ok", { jobId: "native1", token }, undefined, undefined, workerCtx);
+  assert.equal(
+    loadRun(runPaths(agentDir, "native1").json)?.workItems?.[0]?.native?.agentId,
+    "Worker-2",
+  );
+  await assert.rejects(
+    bind.execute("other", { jobId: "native1", token }, undefined, undefined, {
+      ...workerCtx,
+      agent: { ...workerCtx.agent, id: "Intruder" },
+    }),
+  );
+});
+
+test("OMP native wave rewrites task and accepts only claimed settled result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-wave-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "implement feature", "nativewave1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "pending" as const,
+        attempts: 0,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const assignment = loadRun(path)!.workItems![0];
+  assert.equal(assignment.status, "running");
+  const [rewrite] = host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "call1",
+      input: { context: "ignored", tasks: [{ task: "ignored", solutionSpace: "ignored" }] },
+    },
+    mainCtx,
+  ) as Array<{ input: { tasks: Array<{ name: string; agent: string; task: string }> } }>;
+  assert.equal(rewrite.input.tasks[0].name, assignment.native!.expectedAgentId);
+  assert.equal(rewrite.input.tasks[0].agent, "devteam-implementor");
+  assert.match(rewrite.input.tasks[0].task, new RegExp(assignment.native!.token));
+  const { default: activate } = await import("../src/index.ts");
+  const worker = createHost();
+  activate(worker.pi);
+  const workerCtx = {
+    ...ctx,
+    agent: {
+      kind: "sub",
+      name: "devteam-implementor",
+      id: assignment.native!.expectedAgentId,
+      parentId: "Main",
+    },
+  };
+  worker.emit("session_start", {}, workerCtx);
+  await worker.tools
+    .get("devteam_bind")!
+    .execute(
+      "bind",
+      { jobId: run.jobId, token: assignment.native!.token },
+      undefined,
+      undefined,
+      workerCtx,
+    );
+  await worker.tools
+    .get("devteam_handoff")!
+    .execute("done", { action: "implementor_done" }, undefined, undefined, workerCtx);
+  host.emit(
+    "tool_result",
+    {
+      toolName: "task",
+      toolCallId: "call1",
+      details: { results: [{ id: assignment.native!.expectedAgentId, exitCode: 0 }] },
+    },
+    mainCtx,
+  );
+  assert.equal(loadRun(path)!.workItems![0].status, "done");
+  assert.equal(loadRun(path)!.workItems![0].native, undefined);
+});
+
+test("startup preserves locked native work owned by another orchestrator", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-recovery-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "active native work", "nativeowned1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    pipelineLocked: true,
+    pipelineOwner: "other-owner",
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "running" as const,
+        attempts: 1,
+        native: {
+          token: "01234567-89ab-cdef-0123-456789abcdef",
+          attempt: 1,
+          parentId: "Main",
+          expectedAgentId: "Worker",
+          agentId: "Worker",
+        },
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  const originalItems = loadRun(path)!.workItems;
+  writeCurrentJobId(agentDir, run.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+  const restored = loadRun(path)!;
+  assert.equal(restored.pipelineOwner, "other-owner");
+  assert.equal(restored.pipelineLocked, true);
+  assert.deepEqual(restored.workItems, originalItems);
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  assert.deepEqual(loadRun(path)!.workItems, originalItems);
+  assert.ok(host.notifications.some((text) => text.includes("Native work may still be active")));
+});
+
+test("startup preserves locked native work without a recorded owner", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-unowned-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "active native work", "nativeunowned1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    pipelineLocked: true,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "running" as const,
+        attempts: 1,
+        native: {
+          token: "01234567-89ab-cdef-0123-456789abcdef",
+          attempt: 1,
+          parentId: "Main",
+          expectedAgentId: "Worker",
+        },
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  const originalItems = loadRun(path)!.workItems;
+  writeCurrentJobId(agentDir, run.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+  assert.equal(loadRun(path)!.pipelineLocked, true);
+  assert.deepEqual(loadRun(path)!.workItems, originalItems);
+  await host.commands.get("devteam")!.handler("stop", ctx);
+  assert.equal(loadRun(path)!.pipelineLocked, true);
+});
+
+test("native stop invalidates in-flight result and retains stopped work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-stop-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  let aborted = false;
+  const mainCtx = {
+    ...ctx,
+    abort: () => {
+      aborted = true;
+    },
+    agent: { kind: "main", id: "Main", name: "main" },
+  };
+  const run = {
+    ...emptyRun("e2e-session", "stop work", "nativestop1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "pending" as const,
+        attempts: 0,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const item = loadRun(path)!.workItems![0];
+  host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "cancelled",
+      input: { task: "ignored", solutionSpace: "ignored" },
+    },
+    mainCtx,
+  );
+  await host.commands.get("devteam")!.handler("stop", mainCtx);
+  assert.equal(aborted, true);
+  assert.equal(loadRun(path)!.halted, true);
+  host.emit(
+    "tool_result",
+    {
+      toolName: "task",
+      toolCallId: "cancelled",
+      details: { results: [{ id: item.native!.expectedAgentId, exitCode: 0 }] },
+    },
+    mainCtx,
+  );
+  assert.equal(loadRun(path)!.halted, true);
+  assert.notEqual(loadRun(path)!.workItems![0].status, "done");
+});
+
+test("native flat task rewrite fails closed when result is missing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-flat-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "flat work", "nativeflat1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["src/a.ts"],
+        dependsOn: [],
+        status: "pending" as const,
+        attempts: 0,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const item = loadRun(path)!.workItems![0];
+  const [rewrite] = host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "flat",
+      input: { steps: ["ignored"], solutionSpace: "ignored" },
+    },
+    mainCtx,
+  ) as Array<{
+    input: { name: string; agent: string; steps: string[]; tasks?: unknown };
+  }>;
+  assert.equal(rewrite.input.name, item.native!.expectedAgentId);
+  assert.equal(rewrite.input.agent, "devteam-implementor");
+  assert.match(rewrite.input.steps[0], new RegExp(item.native!.token));
+  assert.equal(rewrite.input.tasks, undefined);
+  host.emit(
+    "tool_result",
+    { toolName: "task", toolCallId: "flat", details: { results: [] } },
+    mainCtx,
+  );
+  assert.equal(loadRun(path)!.workItems![0].status, "failed");
+  assert.match(loadRun(path)!.workItems![0].error ?? "", /failed|handoff/i);
+});
+
+test("native recovery requires confirmation and refuses a known live owner", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-recover-confirm-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  const run = {
+    ...emptyRun("e2e-session", "recover", "recover-native"),
+    stage: "implement" as const,
+    pipelineLocked: true,
+    pipelineOwner: "unknown-owner",
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["one.ts"],
+        dependsOn: ["blocked"],
+        status: "running" as const,
+        attempts: 1,
+        native: { token: "old-token", attempt: 1, parentId: "Main", expectedAgentId: "Old" },
+      },
+      {
+        id: "blocked",
+        layer: "general" as const,
+        title: "Blocked",
+        files: [],
+        dependsOn: [],
+        status: "failed" as const,
+        attempts: 2,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  writeCurrentJobId(agentDir, run.jobId, "e2e-session");
+  host.emit("session_start", {}, ctx);
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  assert.equal(loadRun(path)?.workItems?.[0]?.native?.token, "old-token");
+  ctx.hasUI = false;
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  assert.equal(loadRun(path)?.workItems?.[0]?.native?.token, "old-token");
+  ctx.hasUI = true;
+  ctx.ui.confirm = async () => true;
+  saveRun(
+    path,
+    {
+      ...run,
+      workItems: [
+        {
+          ...run.workItems[0]!,
+          native: { ...run.workItems[0]!.native, host: hostname(), pid: process.pid },
+        },
+      ],
+    },
+    agentDir,
+  );
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  assert.equal(loadRun(path)?.workItems?.[0]?.native?.token, "old-token");
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler("continue", ctx);
+  assert.equal(loadRun(path)?.workItems?.[0]?.native, undefined);
+  assert.equal(loadRun(path)?.workItems?.[0]?.status, "pending");
+});
+
+test("late native result cannot modify or unlock a newer attempt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-stale-result-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "work", "stale-native"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    workItems: [
+      {
+        id: "one",
+        layer: "general" as const,
+        title: "One",
+        files: ["one.ts"],
+        dependsOn: [],
+        status: "pending" as const,
+        attempts: 0,
+      },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const old = loadRun(path)!;
+  host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "old-call",
+      input: { task: "ignored", solutionSpace: "ignored" },
+    },
+    mainCtx,
+  );
+  const item = old.workItems![0]!;
+  const replacement = {
+    ...old,
+    pipelineLocked: true,
+    workItems: [
+      {
+        ...item,
+        attempts: item.attempts + 1,
+        native: {
+          ...item.native!,
+          attempt: item.attempts + 1,
+          token: "new-token",
+          expectedAgentId: "NewAgent",
+        },
+      },
+    ],
+  };
+  saveRun(path, replacement, agentDir);
+  host.emit(
+    "tool_result",
+    {
+      toolName: "task",
+      toolCallId: "old-call",
+      details: { results: [{ id: item.native!.expectedAgentId, exitCode: 0 }] },
+    },
+    mainCtx,
+  );
+  const after = loadRun(path)!;
+  assert.equal(after.pipelineLocked, true);
+  assert.deepEqual(after.workItems, replacement.workItems);
 });

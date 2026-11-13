@@ -75,6 +75,10 @@ export function normalizeWorkItems(raw: unknown): WorkItem[] {
     while (used.has(id)) id = `${id}-${index + 1}`;
     used.add(id);
     const service = String(node.service ?? node.serviceName ?? "").trim();
+    const native =
+      node.native && typeof node.native === "object"
+        ? (node.native as Record<string, unknown>)
+        : undefined;
     items.push({
       id,
       layer,
@@ -89,6 +93,26 @@ export function normalizeWorkItems(raw: unknown): WorkItem[] {
       summary:
         typeof node.summary === "string" && node.summary.trim() ? node.summary.trim() : undefined,
       error: typeof node.error === "string" && node.error.trim() ? node.error.trim() : undefined,
+      native:
+        native &&
+        typeof native.token === "string" &&
+        typeof native.attempt === "number" &&
+        typeof native.parentId === "string" &&
+        typeof native.expectedAgentId === "string" &&
+        (native.agentId === undefined || typeof native.agentId === "string")
+          ? {
+              token: native.token,
+              attempt: native.attempt,
+              parentId: native.parentId,
+              expectedAgentId: native.expectedAgentId,
+              agentId: native.agentId as string | undefined,
+              host: typeof native.host === "string" ? native.host : undefined,
+              pid:
+                typeof native.pid === "number" && Number.isSafeInteger(native.pid) && native.pid > 0
+                  ? native.pid
+                  : undefined,
+            }
+          : undefined,
     });
   }
 

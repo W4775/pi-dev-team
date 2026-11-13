@@ -138,6 +138,15 @@ export type WorkItem = {
   attempts: number;
   summary?: string;
   error?: string;
+  native?: {
+    token: string;
+    attempt: number;
+    parentId: string;
+    expectedAgentId: string;
+    agentId?: string;
+    host?: string;
+    pid?: number;
+  };
 };
 
 /** Read-only recon for the planner. Paths are where to look, not a write allowlist. */

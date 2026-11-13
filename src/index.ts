@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
@@ -185,6 +186,47 @@ export default function (pi: ExtensionAPI) {
     (typeof pi.getFlag("devteam-task") === "string"
       ? (pi.getFlag("devteam-task") as string)
       : undefined) ?? process.env.DEVTEAM_TASK;
+  let nativeJobId: string | undefined;
+  let nativeTaskId: string | undefined;
+  let nativeAgentId: string | undefined;
+  let nativeParentId: string | undefined;
+  let nativeAttempt: number | undefined;
+  let nativeDispatch:
+    | { marker: string; items: WorkItem[]; calls: Map<string, WorkItem[]>; stale: boolean }
+    | undefined;
+  let nativeResumeQueued = false;
+  type NativeAgent = { kind?: string; id?: string; name?: string; parentId?: string };
+  function nativeAgent(ctx: ExtensionContext): NativeAgent | undefined {
+    const agent = (ctx as ExtensionContext & { agent?: NativeAgent }).agent;
+    return agent?.kind === "sub" && agent.name === "devteam-implementor" ? agent : undefined;
+  }
+
+  function nativeAssignment(ctx: ExtensionContext): WorkItem | undefined {
+    const agent = nativeAgent(ctx);
+    if (
+      !agent ||
+      !nativeJobId ||
+      !nativeTaskId ||
+      agent.id !== nativeAgentId ||
+      agent.parentId !== nativeParentId
+    )
+      return undefined;
+    const run = store.load();
+    const item = findItem(run?.workItems, nativeTaskId);
+    if (
+      !run ||
+      run.halted ||
+      run.stage !== "implement" ||
+      !run.pipelineLocked ||
+      item?.status !== "running" ||
+      item.attempts !== nativeAttempt ||
+      item.native?.agentId !== agent.id ||
+      item.native.parentId !== agent.parentId ||
+      item.native.attempt !== nativeAttempt
+    )
+      return undefined;
+    return item;
+  }
 
   let sessionId = "session";
   let jobId = "session";
@@ -212,6 +254,7 @@ export default function (pi: ExtensionAPI) {
     childAborts.clear();
   }
   function standDown(ctx?: ExtensionContext): void {
+    nativeDispatch = undefined;
     abortAllChildren();
     resetDialogAbort();
     childActivities.clear();
@@ -331,11 +374,12 @@ export default function (pi: ExtensionAPI) {
       return mutateRun(statePath(), agentDirSafe(), change);
     },
     agentDir: () => agentDirSafe(),
-    sessionId: () => jobId,
-    taskId: () => childTaskId,
+    sessionId: () => nativeJobId ?? jobId,
+    taskId: () => childTaskId ?? nativeTaskId,
   };
 
   function statePath(): string {
+    if (nativeJobId) return runPaths(agentDirSafe(), nativeJobId).json;
     if (childStatePath) return childStatePath;
     return runPaths(agentDirSafe(), jobId).json;
   }
@@ -406,6 +450,65 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const path = runPaths(agentDirSafe(), picked.jobId).json;
+    const initial = loadRun(path);
+    if (initial && (initial.pipelineOwner || initial.pipelineLocked)) {
+      const native = initial.workItems?.filter((item) => item.native) ?? [];
+      if (initial.stage !== "implement" || !initial.pipelineLocked || !native.length) {
+        notify(
+          ctx,
+          "Job is owned or locked; its owner cannot be safely recovered here.",
+          "warning",
+        );
+        return;
+      }
+      const live = native.some((item) => {
+        const identity = item.native;
+        if (!identity?.pid || identity.host !== hostname()) return false;
+        try {
+          process.kill(identity.pid, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      });
+      if (advancing || nativeDispatch || live) {
+        notify(
+          ctx,
+          "Native work is still active; wait for it to finish before continuing.",
+          "warning",
+        );
+        return;
+      }
+      if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
+        notify(
+          ctx,
+          "Native work has an unknown owner. Interactive confirmation is required to recover it.",
+          "warning",
+        );
+        return;
+      }
+      const confirmed = await ctx.ui.confirm(
+        "Recover interrupted native work?",
+        "Verify that every previous host, worker, and subprocess for this job has stopped. Continuing while any remain active can cause simultaneous edits and data loss. Have you verified they are all stopped?",
+      );
+      if (!confirmed) return;
+      const snapshot = JSON.stringify(initial);
+      const recovered = mutateRun(path, agentDirSafe(), (current) => {
+        if (JSON.stringify(current) !== snapshot || advancing || nativeDispatch) return undefined;
+        return {
+          ...current,
+          pipelineOwner: undefined,
+          pipelineLocked: false,
+          workItems: current.workItems?.map((item) =>
+            item.native ? { ...item, status: "pending" as const, native: undefined } : item,
+          ),
+        };
+      });
+      if (!recovered) {
+        notify(ctx, "Job changed during recovery; inspect its status and try again.", "warning");
+        return;
+      }
+    }
     let blocked = false;
     const attached = mutateRun(path, agentDirSafe(), (loaded) => {
       if (loaded.pipelineOwner || loaded.pipelineLocked) {
@@ -423,7 +526,7 @@ export default function (pi: ExtensionAPI) {
       notify(
         ctx,
         blocked
-          ? "Job is owned or locked. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON."
+          ? "Job is owned or locked. Use /devteam continue after verifying its workers have stopped."
           : `Could not load job ${picked.jobId}.`,
         "warning",
       );
@@ -500,7 +603,17 @@ export default function (pi: ExtensionAPI) {
       pi.setActiveTools(intersect(all, PARENT_PLANNER_TOOLS));
       return;
     }
-    pi.setActiveTools(intersect(all, ["read", "grep", "find", "ls", "glob", "devteam_state"]));
+    pi.setActiveTools(
+      intersect(all, [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "glob",
+        "devteam_state",
+        ...(nativeDispatch ? ["task"] : []),
+      ]),
+    );
   }
 
   function modelId(ctx: ExtensionContext): string | undefined {
@@ -640,6 +753,108 @@ export default function (pi: ExtensionAPI) {
     assignment?: ChildAssignment,
   ) {
     return childRunner.run(ctx, run, role, assignment);
+  }
+
+  async function scheduleNativeWork(ctx: ExtensionContext, incoming: RunState): Promise<void> {
+    let current = store.load() ?? incoming;
+    const retry = retryableItems(current.workItems);
+    if (!nextWave(current.workItems, config?.parallel).length && retry.length) {
+      const ids = new Set(retry.map((item) => item.id));
+      current = persist({
+        ...current,
+        workItems: current.workItems?.map((item) =>
+          ids.has(item.id)
+            ? { ...item, status: "pending", error: undefined, native: undefined }
+            : item,
+        ),
+      });
+    }
+    const wave = nextWave(current.workItems, config?.parallel);
+    if (!wave.length) {
+      if (
+        !itemsRemaining(current.workItems).length &&
+        !(current.workItems ?? []).some((item) => item.status === "failed")
+      ) {
+        persist(enterReview(current));
+      } else {
+        persist({
+          ...current,
+          pipelineLocked: false,
+          lastError:
+            "Implementation is blocked or failed. Use /devteam status, /devteam retry, or /devteam skip.",
+        });
+      }
+      return;
+    }
+    const parentId = (ctx as ExtensionContext & { agent?: NativeAgent }).agent?.id;
+    if (!parentId)
+      throw new Error("OMP main agent identity unavailable; cannot schedule native implementors.");
+    const ids = new Set(wave.map((item) => item.id));
+    const marker = randomUUID();
+    const updated = store.mutate((run) => ({
+      ...run,
+      pipelineLocked: true,
+      lastError: undefined,
+      workItems: run.workItems?.map((item) =>
+        ids.has(item.id)
+          ? {
+              ...item,
+              status: "running" as const,
+              attempts: item.attempts + 1,
+              error: undefined,
+              native: {
+                token: randomUUID(),
+                attempt: item.attempts + 1,
+                parentId,
+                expectedAgentId: `Devteam${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+                host: hostname(),
+                pid: process.pid,
+              },
+            }
+          : item,
+      ),
+    }));
+    if (!updated) throw new Error("Cannot persist native assignments.");
+    nativeDispatch = {
+      marker,
+      items: (updated.workItems ?? []).filter((item) => ids.has(item.id)),
+      calls: new Map(),
+      stale: false,
+    };
+    applyParentTools(updated);
+    await deliverUserPrompt(
+      `Devteam scheduler ${marker}: call the native task tool now. Use one task call with a tasks array if available, otherwise one flat task call. Arguments will be replaced by the scheduler. Do not perform implementation yourself.`,
+    );
+  }
+
+  function resumeNativePipeline(ctx: ExtensionContext): void {
+    if (nativeResumeQueued) return;
+    nativeResumeQueued = true;
+    queueMicrotask(() => {
+      nativeResumeQueued = false;
+      const run = store.load();
+      if (run && !run.halted && !nativeDispatch) void advancePipeline(ctx, run);
+    });
+  }
+
+  function failNativeDispatch(ctx: ExtensionContext, reason: string): void {
+    const dispatch = nativeDispatch;
+    if (!dispatch) return;
+    nativeDispatch = undefined;
+    store.mutate((run) => ({
+      ...run,
+      pipelineLocked: false,
+      workItems: run.workItems?.map((item) =>
+        dispatch.items.some(
+          (assigned) => assigned.id === item.id && assigned.native?.token === item.native?.token,
+        )
+          ? { ...item, status: "failed" as const, error: reason, native: undefined }
+          : item,
+      ),
+      lastError: reason,
+    }));
+    applyParentTools(store.load());
+    resumeNativePipeline(ctx);
   }
 
   async function runWave(ctx: ExtensionContext, run: RunState, wave: WorkItem[]): Promise<void> {
@@ -988,7 +1203,12 @@ export default function (pi: ExtensionAPI) {
             continue;
           }
           case "spawn_work": {
-            await runDelegatedWork(ctx, run);
+            if (isOmpHost()) {
+              await scheduleNativeWork(ctx, run);
+              if (nativeDispatch) return;
+            } else {
+              await runDelegatedWork(ctx, run);
+            }
             const afterWork = store.load();
             if (!afterWork || afterWork.halted) return;
             if (afterWork.stage === "implement") {
@@ -1114,6 +1334,62 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerTool({
+    name: "devteam_bind",
+    label: "Bind devteam assignment",
+    description: "Bind a native devteam implementor to its assigned work item.",
+    parameters: Type.Object({ jobId: Type.String(), token: Type.String() }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!ctx) throw new Error("Native agent context required.");
+      const agent = nativeAgent(ctx);
+      if (
+        !agent?.id ||
+        !agent.parentId ||
+        !/^[a-z0-9]+$/.test(params.jobId) ||
+        !/^[0-9a-f-]{36}$/.test(params.token)
+      )
+        throw new Error("Invalid native assignment claim.");
+      const path = runPaths(agentDirSafe(), params.jobId).json;
+      let matched: WorkItem | undefined;
+      mutateRun(path, agentDirSafe(), (run) => {
+        if (
+          run.jobId !== params.jobId ||
+          run.cwd !== ctx.cwd ||
+          run.halted ||
+          run.stage !== "implement" ||
+          !run.pipelineLocked
+        )
+          return undefined;
+        const item = run.workItems?.find(
+          (candidate) =>
+            candidate.status === "running" &&
+            candidate.native?.token === params.token &&
+            candidate.native.attempt === candidate.attempts &&
+            candidate.native.parentId === agent.parentId &&
+            candidate.native.expectedAgentId === agent.id &&
+            (!candidate.native.agentId || candidate.native.agentId === agent.id),
+        );
+        if (!item?.native) return undefined;
+        matched = item;
+        return {
+          ...run,
+          workItems: run.workItems?.map((candidate) =>
+            candidate.id === item.id
+              ? { ...candidate, native: { ...item.native!, agentId: agent.id } }
+              : candidate,
+          ),
+        };
+      });
+      if (!matched) throw new Error("Native assignment claim rejected.");
+      nativeJobId = params.jobId;
+      nativeTaskId = matched.id;
+      nativeAgentId = agent.id;
+      nativeParentId = agent.parentId;
+      nativeAttempt = matched.attempts;
+      return { content: [{ type: "text" as const, text: `Bound work item ${matched.id}.` }] };
+    },
+  });
+
+  pi.registerTool({
     name: "devteam_state",
     label: "Devteam state",
     description:
@@ -1211,7 +1487,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const result = applyHandoffTool(store, params);
       if (result.isError) throw new Error(result.text);
-      if (!childRole && ctx) queuePipelineAdvance(ctx);
+      if (!childRole && ctx && !nativeAgent(ctx)) queuePipelineAdvance(ctx);
       return {
         content: [{ type: "text" as const, text: result.text }],
         terminate: result.terminate,
@@ -1322,7 +1598,7 @@ export default function (pi: ExtensionAPI) {
           ) {
             notify(
               ctx,
-              "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+              "devteam run may still be active. Verify its workers have stopped and use /devteam continue to recover interrupted native work.",
               "warning",
             );
             return;
@@ -1347,11 +1623,11 @@ export default function (pi: ExtensionAPI) {
           const active = store.load();
           if (
             (active?.pipelineOwner && active.pipelineOwner !== owner) ||
-            (active?.pipelineLocked && !advancing)
+            (active?.pipelineLocked && !advancing && !nativeDispatch)
           ) {
             notify(
               ctx,
-              "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+              "devteam run may still be active. Verify its workers have stopped and use /devteam continue to recover interrupted native work.",
               "warning",
             );
             return;
@@ -1386,12 +1662,20 @@ export default function (pi: ExtensionAPI) {
 
         const run = store.load();
         if (
+          (sub === "continue" || sub === "resume") &&
+          restText.toLowerCase() !== "list" &&
+          (restText || (run?.pipelineLocked && run.workItems?.some((item) => item.native)))
+        ) {
+          await resumeJob(ctx, restText || run!.jobId);
+          return;
+        }
+        if (
           (run?.pipelineOwner && run.pipelineOwner !== owner) ||
           (run?.pipelineLocked && !advancing)
         ) {
           notify(
             ctx,
-            "devteam run may still be active. Stop all parent and child processes before removing pipelineOwner and clearing pipelineLocked in its run JSON.",
+            "devteam run may still be active. Verify its workers have stopped and use /devteam continue to recover interrupted native work.",
             "warning",
           );
           return;
@@ -1399,19 +1683,6 @@ export default function (pi: ExtensionAPI) {
 
         if (sub === "continue" && restText.toLowerCase() === "list") {
           await showJobList(ctx);
-          return;
-        }
-
-        if (
-          (sub === "continue" || sub === "resume") &&
-          restText &&
-          restText.toLowerCase() !== "list"
-        ) {
-          if (run?.pipelineLocked || advancing) {
-            notify(ctx, "devteam is busy. /devteam stop to abort this step.", "warning");
-            return;
-          }
-          await resumeJob(ctx, restText);
           return;
         }
 
@@ -1521,9 +1792,16 @@ export default function (pi: ExtensionAPI) {
         defaultTools = undefined;
       }
 
-      if (childRole) return;
+      if (childRole || nativeAgent(ctx)) return;
 
       const run = store.load();
+      if (run?.pipelineLocked && run.workItems?.some((item) => item.native)) {
+        notify(
+          ctx,
+          "Native work may still be active. Verify all previous hosts, workers, and subprocesses have stopped, then use /devteam continue.",
+          "warning",
+        );
+      }
       if (run?.jobId) jobId = run.jobId;
       applyParentTools(run);
       refreshUi(ctx, run);
@@ -1568,7 +1846,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("before_agent_start", (event, _ctx) => {
+  pi.on("before_agent_start", (event, ctx) => {
+    if (nativeAgent(ctx)) return;
     const run = store.load();
     const role = childRole ?? run?.interactiveRole;
     applyParentTools(run);
@@ -1584,23 +1863,126 @@ export default function (pi: ExtensionAPI) {
   });
 
   onAgentIdle(pi, (_event, ctx) => {
-    if (childRole) return;
+    if (childRole || nativeAgent(ctx as ExtensionContext)) return;
     queuePipelineAdvance(ctx as ExtensionContext);
   });
 
+  // OMP emits this only after queued turns and task calls have settled.
+  if (isOmpHost()) {
+    const on = pi.on as unknown as (
+      event: string,
+      handler: (event: unknown, ctx: ExtensionContext) => void,
+    ) => void;
+    on("session_stop", (_event, ctx) => {
+      if (nativeDispatch && !nativeDispatch.calls.size)
+        failNativeDispatch(ctx, "Native task call was not dispatched.");
+    });
+  }
+
   pi.on("tool_call", (event, ctx) => {
-    if (!childRole) {
+    if (!nativeAgent(ctx) && !childRole && event.toolName === "task" && nativeDispatch) {
+      const dispatch = nativeDispatch;
+      const input = event.input as Record<string, unknown>;
+      const batch = Array.isArray(input.tasks);
+      const selected = batch ? dispatch.items : dispatch.items.slice(0, 1);
+      if (!selected.length) return { block: true, reason: "No native assignments remain." };
+      const tasks = selected.map((item) => {
+        const brief = [
+          `Claim assignment first: call devteam_bind with jobId ${jobId} and token ${item.native!.token}.`,
+          `Work item ${item.id}: ${item.title}`,
+          item.details,
+          `Assigned files: ${item.files.join(", ") || "(none)"}`,
+          item.service ? `Service: ${item.service}` : "",
+          "Read devteam_state for context. Work only within assigned scope. Call devteam_handoff with implementor_done when finished.",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const base = {
+          name: item.native!.expectedAgentId,
+          agent: "devteam-implementor",
+          solutionSpace: "Implement assigned work item within specified scope.",
+        };
+        const template = batch ? (input.tasks as Record<string, unknown>[])[0] : input;
+        return template && Array.isArray(template.steps)
+          ? { ...base, steps: [brief] }
+          : { ...base, task: brief };
+      });
+      const callId = (event as { toolCallId?: string }).toolCallId;
+      if (!callId) return { block: true, reason: "Native task call has no identity." };
+      dispatch.calls.set(callId, selected);
+      dispatch.items = dispatch.items.filter((item) => !selected.includes(item));
+      return { input: batch ? { context: `Devteam job ${jobId}`, tasks } : tasks[0] };
+    }
+    const native = nativeAgent(ctx);
+    const assignment = native ? nativeAssignment(ctx) : undefined;
+    if (native && event.toolName !== "devteam_bind") {
+      if (!assignment) {
+        if (["read", "grep", "glob", "find", "yield"].includes(event.toolName)) return;
+        return { block: true, reason: "Bind an active devteam assignment first." };
+      }
+      if (
+        ![
+          "read",
+          "grep",
+          "glob",
+          "find",
+          "bash",
+          "edit",
+          "write",
+          "devteam_state",
+          "devteam_handoff",
+          "yield",
+        ].includes(event.toolName)
+      )
+        return { block: true, reason: "Tool unavailable to devteam implementors." };
+      const input = event.input as Record<string, unknown>;
+      if (event.toolName === "devteam_handoff" && input.action !== "implementor_done")
+        return { block: true, reason: "Implementors may only hand off their assigned item." };
+      if (
+        event.toolName === "devteam_state" &&
+        input.action !== "get" &&
+        input.section !== `${assignment.layer}Notes`
+      )
+        return { block: true, reason: "Implementors may only update their own notes." };
+      if (isWriteTool(event.toolName) && !writePathFromInput(event.input)) {
+        const patch = (event.input as Record<string, unknown>).input;
+        if (event.toolName !== "edit" || typeof patch !== "string" || /^MV\s/m.test(patch))
+          return { block: true, reason: "Cannot verify write path against assignment." };
+        const paths = [...patch.matchAll(/^\[([^#\r\n]+)#[0-9A-F]{4}\]$/gm)].map(
+          (match) => match[1],
+        );
+        if (!paths.length) return { block: true, reason: "Cannot verify edit paths." };
+        const run = store.load();
+        const service = serviceByName(run?.stack?.services, assignment.service);
+        for (const path of paths) {
+          const gate = gateWrite(
+            assignment.layer,
+            path,
+            ctx.cwd,
+            config ?? undefined,
+            service,
+            assignment.files,
+            run ? runPaths(agentDirSafe(), run.jobId).demoDir : undefined,
+          );
+          if (gate.block) return { block: true, reason: gate.reason };
+        }
+      }
+    }
+    if (!childRole && !native) {
       const run = store.load();
       if (!run || run.stage === "idle" || run.stage === "done") return;
     }
-    const role = currentRole(ctx);
+    const role = assignment?.layer ?? currentRole(ctx);
     const current = store.load();
     const service = serviceByName(
       current?.stack?.services,
-      childServiceName ?? current?.currentService,
+      assignment?.service ?? childServiceName ?? current?.currentService,
     );
-    const assigned =
-      childRole === "scout" ? undefined : findItem(current?.workItems, childTaskId)?.files;
+    const assigned = native
+      ? assignment?.files
+      : childRole === "scout"
+        ? undefined
+        : findItem(current?.workItems, childTaskId)?.files;
     const demoDir = current ? runPaths(agentDirSafe(), current.jobId).demoDir : undefined;
     const writePath = isWriteTool(event.toolName) ? writePathFromInput(event.input) : undefined;
     if (writePath) {
@@ -1624,6 +2006,80 @@ export default function (pi: ExtensionAPI) {
         demoDir,
       );
       if (gate.block) return { block: true, reason: gate.reason };
+    }
+  });
+
+  pi.on("tool_result", (event, ctx) => {
+    if (event.toolName !== "task" || !nativeDispatch || nativeAgent(ctx)) return;
+    const dispatch = nativeDispatch;
+    const callId = (event as { toolCallId?: string }).toolCallId;
+    const assigned = callId ? dispatch.calls.get(callId) : undefined;
+    if (!assigned) return;
+    dispatch.calls.delete(callId!);
+    const details = (
+      event as {
+        details?: {
+          results?: Array<{ id?: string; exitCode?: number; error?: string; aborted?: boolean }>;
+        };
+        isError?: boolean;
+      }
+    ).details;
+    const finished = !dispatch.items.length && !dispatch.calls.size;
+    store.mutate((run) => {
+      const matches = assigned.every((expected) => {
+        const item = run.workItems?.find((candidate) => candidate.id === expected.id);
+        return (
+          item?.native &&
+          expected.native &&
+          item.attempts === expected.attempts &&
+          item.native.attempt === expected.native.attempt &&
+          item.native.token === expected.native.token &&
+          item.native.parentId === expected.native.parentId &&
+          item.native.expectedAgentId === expected.native.expectedAgentId &&
+          (!item.native.agentId || item.native.agentId === expected.native.expectedAgentId)
+        );
+      });
+      if (!matches || run.halted || run.stage !== "implement" || !run.pipelineLocked) {
+        dispatch.stale = true;
+        return undefined;
+      }
+      return {
+        ...run,
+        pipelineLocked: finished && !dispatch.stale ? false : run.pipelineLocked,
+        workItems: run.workItems?.map((item) => {
+          if (!assigned.some((expected) => expected.id === item.id) || !item.native) return item;
+          const result = details?.results?.find(
+            (entry) => entry.id === item.native?.expectedAgentId,
+          );
+          const success =
+            !event.isError &&
+            result &&
+            result.exitCode === 0 &&
+            !result.aborted &&
+            item.native.agentId === item.native.expectedAgentId &&
+            item.status === "done";
+          return success
+            ? { ...item, native: undefined }
+            : {
+                ...item,
+                status: "failed" as const,
+                error:
+                  result?.error || "Native implementor failed or finished without a valid handoff.",
+                native: undefined,
+              };
+        }),
+      };
+    });
+    if (finished) {
+      nativeDispatch = undefined;
+      if (!dispatch.stale) {
+        applyParentTools(store.load());
+        resumeNativePipeline(ctx);
+      }
+    } else if (!dispatch.stale && dispatch.items.length && !dispatch.calls.size) {
+      void deliverUserPrompt(
+        `Devteam scheduler ${dispatch.marker}: call native task again for remaining assignments.`,
+      );
     }
   });
 }
