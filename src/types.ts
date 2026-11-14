@@ -160,6 +160,7 @@ export type ScoutItem = {
   attempts: number;
   findings?: string;
   error?: string;
+  native?: WorkItem["native"];
 };
 
 export type ChildAssignment = {
@@ -191,6 +192,7 @@ export type RunState = {
   version: 1;
   sessionId: string;
   jobId: string;
+  nativeRole?: { role: IsolatedRole; stage: Stage; native: NonNullable<WorkItem["native"]> };
   task: string;
   stage: Stage;
   pauseReason?: PauseReason;

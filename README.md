@@ -29,6 +29,12 @@ omp plugin install github:W4775/pi-dev-team
 For a local OMP checkout, load the package directory (`omp -e /path/to/pi-dev-team`),
 not `src/index.ts`: OMP discovers packaged agent definitions from directory roots.
 
+On OMP, non-interactive specialists run as native subagents; Pi uses child
+processes. Planner and designer interactions remain in the parent session.
+OMP discovers the packaged `devteam-*` agent definitions by name. Project or
+user definitions with those names can override them, so keep those names
+reserved for this plugin.
+
 Then in any Pi/OMP session:
 
 ```text
@@ -112,9 +118,10 @@ Create `.pi/devteam.json` (or `.omp/devteam.json` on OMP) — trusted projects o
 - `skills` — stack skills for each kind of work; see `catalog/stacks.json` for available IDs.
 - `services` — override detected services and their commands.
 - `bash.test` — extra trusted tester command prefixes, including project-specific build or verification commands; service `test` commands also authorize their segments.
-- `models` — choose a model for each role. Pi uses the session model.
+- `models` — choose a model for each role. Pi inherits the session model when unset. On OMP, configured role models override devteam defaults; later OMP spawn-routing hooks can override that choice.
 - `parallel` — maximum number of independent specialists running at once (default 3, maximum 6).
 - `maxToolCalls`, `childIdle`, `repeatToolAbort` — adjust agent limits.
+On OMP, devteam enforces its tool-call, repeated-inspection and running-worker idle limits in the worker session; OMP's own request and runtime limits also apply. A tester or linter must record QA results or hand off explicitly when it has no output.
 
 
 ---

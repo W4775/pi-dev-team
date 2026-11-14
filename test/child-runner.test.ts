@@ -92,6 +92,18 @@ test("child runner infers a missing reviewer handoff through step", async () => 
     notify() {},
     refreshUi() {},
   });
+  const missingQa = await runner.completeNative(
+    ctx(dir),
+    {
+      ...emptyRun("s", "task", "job"),
+      stage: "tester",
+      currentRole: "tester",
+    },
+    "tester",
+    "",
+  );
+  assert.equal(missingQa.stage, "tester");
+  assert.match(missingQa.lastError ?? "", /without QA results/);
 
   const out = await runner.run(ctx(dir), run, "reviewer");
   assert.equal(out.ok, true, out.error);

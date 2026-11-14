@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { register } from "node:module";
 import { test } from "node:test";
+import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { resetProgressFeed } from "../src/ui-progress.ts";
 import {
   emptyRun,
@@ -460,7 +461,7 @@ test("OMP native wave rewrites task and accepts only claimed settled result", as
     mainCtx,
   ) as Array<{ input: { tasks: Array<{ name: string; agent: string; task: string }> } }>;
   assert.equal(rewrite.input.tasks[0].name, assignment.native!.expectedAgentId);
-  assert.equal(rewrite.input.tasks[0].agent, "devteam-implementor");
+  assert.equal(rewrite.input.tasks[0].agent, "devteam-general");
   assert.match(rewrite.input.tasks[0].task, new RegExp(assignment.native!.token));
   const { default: activate } = await import("../src/index.ts");
   const worker = createHost();
@@ -469,7 +470,7 @@ test("OMP native wave rewrites task and accepts only claimed settled result", as
     ...ctx,
     agent: {
       kind: "sub",
-      name: "devteam-implementor",
+      name: "devteam-general",
       id: assignment.native!.expectedAgentId,
       parentId: "Main",
     },
@@ -498,6 +499,185 @@ test("OMP native wave rewrites task and accepts only claimed settled result", as
   );
   assert.equal(loadRun(path)!.workItems![0].status, "done");
   assert.equal(loadRun(path)!.workItems![0].native, undefined);
+});
+
+test("OMP dispatches a singleton role and advances only after its claimed result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-role-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "review plan", "nativerole1"),
+    cwd: ctx.cwd,
+    stage: "plan_critic" as const,
+    currentRole: "plan_critic" as const,
+    spec: "Implement the requested feature",
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const assignment = loadRun(path)!.nativeRole!;
+  assert.equal(assignment.role, "plan_critic");
+  const [rewrite] = host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "role-call",
+      input: { context: "ignored", tasks: [{ task: "ignored", solutionSpace: "ignored" }] },
+    },
+    mainCtx,
+  ) as Array<{ input: { tasks: Array<{ name: string; agent: string; task: string }> } }>;
+  assert.equal(rewrite.input.tasks[0].name, assignment.native.expectedAgentId);
+  assert.equal(rewrite.input.tasks[0].agent, "devteam-plan-critic");
+  assert.match(rewrite.input.tasks[0].task, new RegExp(assignment.native.token));
+
+  // The test host loader must register before importing the extension.
+  const { default: activate } = await import("../src/index.ts");
+  const worker = createHost();
+  activate(worker.pi);
+  const workerCtx = {
+    ...ctx,
+    agent: {
+      kind: "sub",
+      name: "devteam-plan-critic",
+      id: assignment.native.expectedAgentId,
+      parentId: "Main",
+    },
+  };
+  worker.emit("session_start", {}, workerCtx);
+  await worker.tools
+    .get("devteam_bind")!
+    .execute(
+      "bind",
+      { jobId: run.jobId, token: assignment.native.token },
+      undefined,
+      undefined,
+      workerCtx,
+    );
+  assert.equal(loadRun(path)!.nativeRole!.native.agentId, assignment.native.expectedAgentId);
+  await worker.tools
+    .get("devteam_handoff")!
+    .execute(
+      "done",
+      { action: "critic_approve", summary: "Plan approved" },
+      undefined,
+      undefined,
+      workerCtx,
+    );
+  assert.equal(loadRun(path)!.stage, "plan_critic");
+  assert.equal(loadRun(path)!.pendingHandoff?.action, "critic_approve");
+  host.emit(
+    "tool_result",
+    {
+      toolName: "task",
+      toolCallId: "role-call",
+      details: { results: [{ id: assignment.native.expectedAgentId, exitCode: 0 }] },
+    },
+    mainCtx,
+  );
+  await waitForImmediate();
+  assert.notEqual(loadRun(path)!.stage, "plan_critic");
+  assert.equal(loadRun(path)!.nativeRole, undefined);
+});
+
+test("OMP dispatches scouts and records findings from a bound settled worker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-scout-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "map repository", "nativescout1"),
+    cwd: ctx.cwd,
+    stage: "scout" as const,
+    scoutItems: [
+      { id: "s1", title: "Map repo", files: [], status: "pending" as const, attempts: 0 },
+    ],
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const assignment = loadRun(path)!.scoutItems![0];
+  assert.equal(assignment.status, "running");
+  const [rewrite] = host.emit(
+    "tool_call",
+    {
+      toolName: "task",
+      toolCallId: "scout-call",
+      input: { context: "ignored", tasks: [{ task: "ignored", solutionSpace: "ignored" }] },
+    },
+    mainCtx,
+  ) as Array<{ input: { tasks: Array<{ name: string; agent: string; task: string }> } }>;
+  assert.equal(rewrite.input.tasks[0].name, assignment.native!.expectedAgentId);
+  assert.equal(rewrite.input.tasks[0].agent, "devteam-scout");
+  assert.match(rewrite.input.tasks[0].task, new RegExp(assignment.native!.token));
+
+  // The test host loader must register before importing the extension.
+  const { default: activate } = await import("../src/index.ts");
+  const worker = createHost();
+  activate(worker.pi);
+  const workerCtx = {
+    ...ctx,
+    agent: {
+      kind: "sub",
+      name: "devteam-scout",
+      id: assignment.native!.expectedAgentId,
+      parentId: "Main",
+    },
+  };
+  worker.emit("session_start", {}, workerCtx);
+  await worker.tools
+    .get("devteam_bind")!
+    .execute(
+      "bind",
+      { jobId: run.jobId, token: assignment.native!.token },
+      undefined,
+      undefined,
+      workerCtx,
+    );
+  let stopped = false;
+  const monitoredCtx = {
+    ...workerCtx,
+    abort: () => {
+      stopped = true;
+    },
+  };
+  let blocked = false;
+  for (let i = 0; i < 40 && !blocked; i++) {
+    const [result] = worker.emit(
+      "tool_call",
+      { toolName: "read", input: { path: "src/index.ts" } },
+      monitoredCtx,
+    ) as Array<{ block?: boolean } | undefined>;
+    blocked = result?.block === true;
+  }
+  assert.equal(blocked, true);
+  assert.equal(stopped, true);
+  assert.equal(loadRun(path)!.scoutItems![0].native!.agentId, assignment.native!.expectedAgentId);
+  await worker.tools
+    .get("devteam_handoff")!
+    .execute(
+      "done",
+      { action: "scout_done", summary: "Entry point is src/index.ts" },
+      undefined,
+      undefined,
+      workerCtx,
+    );
+  host.emit(
+    "tool_result",
+    {
+      toolName: "task",
+      toolCallId: "scout-call",
+      details: { results: [{ id: assignment.native!.expectedAgentId, exitCode: 0 }] },
+    },
+    mainCtx,
+  );
+  await waitForImmediate();
+  const result = loadRun(path)!;
+  assert.equal(result.scoutItems![0].status, "done");
+  assert.equal(result.scoutItems![0].findings, "Entry point is src/index.ts");
+  assert.equal(result.scoutItems![0].native, undefined);
+  assert.equal(result.stage, "planner");
+  assert.match(result.scoutNotes ?? "", /Entry point is src\/index\.ts/);
 });
 
 test("startup preserves locked native work owned by another orchestrator", async () => {
@@ -673,7 +853,7 @@ test("native flat task rewrite fails closed when result is missing", async () =>
     input: { name: string; agent: string; steps: string[]; tasks?: unknown };
   }>;
   assert.equal(rewrite.input.name, item.native!.expectedAgentId);
-  assert.equal(rewrite.input.agent, "devteam-implementor");
+  assert.equal(rewrite.input.agent, "devteam-general");
   assert.match(rewrite.input.steps[0], new RegExp(item.native!.token));
   assert.equal(rewrite.input.tasks, undefined);
   host.emit(

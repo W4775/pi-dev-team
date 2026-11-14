@@ -21,7 +21,11 @@ import { processChildHost, createChildRunner } from "./child-runner.ts";
 import {
   activityLine,
   formatElapsed,
+  resolveMaxToolCalls,
   resolveChildIdleMs,
+  describeToolCall,
+  isRepeatedToolLoop,
+  resolveRepeatToolAbort,
   type ChildActivity,
 } from "./child-progress.ts";
 import { detectStack } from "./detect-stack.ts";
@@ -58,7 +62,7 @@ import {
   step,
 } from "./pipeline.ts";
 import { inferScoutSkipFromJudge } from "./judge.ts";
-import { isOmpHost } from "./spawn.ts";
+import { isOmpHost, mapToolsForHost, resolveChildModel, toolsForRole } from "./spawn.ts";
 import { loadRolePrompt } from "./roles.ts";
 import {
   clearRunFiles,
@@ -81,7 +85,7 @@ import type {
   WorkItem,
   ChildAssignment,
 } from "./types.ts";
-import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS } from "./types.ts";
+import { DEFAULT_PROGRESS_EVERY_MS, HANDOFF_ACTIONS, ISOLATED_ROLES } from "./types.ts";
 import { findItem, itemsRemaining, nextWave, retryableItems } from "./work.ts";
 import { compileScoutNotes, nextScoutWave, retryableScouts } from "./scout.ts";
 import {
@@ -186,46 +190,97 @@ export default function (pi: ExtensionAPI) {
     (typeof pi.getFlag("devteam-task") === "string"
       ? (pi.getFlag("devteam-task") as string)
       : undefined) ?? process.env.DEVTEAM_TASK;
+  type NativeEntry = {
+    kind: "work" | "scout" | "role";
+    role: IsolatedRole;
+    id?: string;
+    assignment?: ChildAssignment;
+    native: NonNullable<WorkItem["native"]>;
+    prompt: string;
+  };
   let nativeJobId: string | undefined;
   let nativeTaskId: string | undefined;
   let nativeAgentId: string | undefined;
   let nativeParentId: string | undefined;
   let nativeAttempt: number | undefined;
+  let nativeKind: NativeEntry["kind"] | undefined;
+  let nativeRole: IsolatedRole | undefined;
+  let nativeToolCalls = 0;
+  let nativeRecentTools: string[] = [];
+  let nativeIdleTimer: ReturnType<typeof setTimeout> | undefined;
+  function stopNativeTimer(): void {
+    clearTimeout(nativeIdleTimer);
+    nativeIdleTimer = undefined;
+  }
+  function touchNative(ctx: ExtensionContext): void {
+    stopNativeTimer();
+    const idleMs = resolveChildIdleMs(config?.childIdle);
+    if (!idleMs || !nativeAssignment(ctx)) return;
+    nativeIdleTimer = setTimeout(() => {
+      nativeIdleTimer = undefined;
+      if (nativeAssignment(ctx)) abortParentTurn(ctx);
+    }, idleMs);
+    nativeIdleTimer.unref?.();
+  }
   let nativeDispatch:
-    | { marker: string; items: WorkItem[]; calls: Map<string, WorkItem[]>; stale: boolean }
+    | { marker: string; items: NativeEntry[]; calls: Map<string, NativeEntry[]>; stale: boolean }
     | undefined;
   let nativeResumeQueued = false;
   type NativeAgent = { kind?: string; id?: string; name?: string; parentId?: string };
   function nativeAgent(ctx: ExtensionContext): NativeAgent | undefined {
     const agent = (ctx as ExtensionContext & { agent?: NativeAgent }).agent;
-    return agent?.kind === "sub" && agent.name === "devteam-implementor" ? agent : undefined;
+    return agent?.kind === "sub" &&
+      (agent.name === "devteam-implementor" ||
+        ISOLATED_ROLES.some((role) => agent.name === `devteam-${role.replaceAll("_", "-")}`))
+      ? agent
+      : undefined;
   }
 
-  function nativeAssignment(ctx: ExtensionContext): WorkItem | undefined {
+  function nativeAssignment(ctx: ExtensionContext): NativeEntry | undefined {
     const agent = nativeAgent(ctx);
     if (
       !agent ||
       !nativeJobId ||
-      !nativeTaskId ||
+      !nativeKind ||
+      !nativeRole ||
       agent.id !== nativeAgentId ||
       agent.parentId !== nativeParentId
     )
       return undefined;
     const run = store.load();
-    const item = findItem(run?.workItems, nativeTaskId);
+    if (!run || run.jobId !== nativeJobId || run.halted || !run.pipelineLocked) return undefined;
+    const item =
+      nativeKind === "work"
+        ? run.workItems?.find((v) => v.id === nativeTaskId)
+        : nativeKind === "scout"
+          ? run.scoutItems?.find((v) => v.id === nativeTaskId)
+          : undefined;
+    const identity = nativeKind === "role" ? run.nativeRole?.native : item?.native;
     if (
-      !run ||
-      run.halted ||
-      run.stage !== "implement" ||
-      !run.pipelineLocked ||
-      item?.status !== "running" ||
-      item.attempts !== nativeAttempt ||
-      item.native?.agentId !== agent.id ||
-      item.native.parentId !== agent.parentId ||
-      item.native.attempt !== nativeAttempt
+      !identity ||
+      identity.agentId !== agent.id ||
+      identity.parentId !== agent.parentId ||
+      identity.attempt !== nativeAttempt ||
+      (nativeKind === "role" ? run.nativeRole?.stage !== run.stage : item?.status !== "running")
     )
       return undefined;
-    return item;
+    return {
+      kind: nativeKind,
+      role: nativeRole,
+      id: nativeTaskId,
+      native: identity,
+      prompt: "",
+      assignment: item
+        ? {
+            id: item.id,
+            title: item.title,
+            details: item.details,
+            files: item.files,
+            service: item.service,
+            list: nativeKind === "scout" ? "scout" : "work",
+          }
+        : undefined,
+    };
   }
 
   let sessionId = "session";
@@ -452,8 +507,12 @@ export default function (pi: ExtensionAPI) {
     const path = runPaths(agentDirSafe(), picked.jobId).json;
     const initial = loadRun(path);
     if (initial && (initial.pipelineOwner || initial.pipelineLocked)) {
-      const native = initial.workItems?.filter((item) => item.native) ?? [];
-      if (initial.stage !== "implement" || !initial.pipelineLocked || !native.length) {
+      const native = [
+        ...(initial.workItems?.flatMap((item) => (item.native ? [item.native] : [])) ?? []),
+        ...(initial.scoutItems?.flatMap((item) => (item.native ? [item.native] : [])) ?? []),
+        ...(initial.nativeRole ? [initial.nativeRole.native] : []),
+      ];
+      if (!initial.pipelineLocked || !native.length) {
         notify(
           ctx,
           "Job is owned or locked; its owner cannot be safely recovered here.",
@@ -461,8 +520,7 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
-      const live = native.some((item) => {
-        const identity = item.native;
+      const live = native.some((identity) => {
         if (!identity?.pid || identity.host !== hostname()) return false;
         try {
           process.kill(identity.pid, 0);
@@ -502,6 +560,11 @@ export default function (pi: ExtensionAPI) {
           workItems: current.workItems?.map((item) =>
             item.native ? { ...item, status: "pending" as const, native: undefined } : item,
           ),
+          scoutItems: current.scoutItems?.map((item) =>
+            item.native ? { ...item, status: "pending" as const, native: undefined } : item,
+          ),
+          nativeRole: undefined,
+          pendingHandoff: current.nativeRole ? undefined : current.pendingHandoff,
         };
       });
       if (!recovered) {
@@ -755,75 +818,149 @@ export default function (pi: ExtensionAPI) {
     return childRunner.run(ctx, run, role, assignment);
   }
 
-  async function scheduleNativeWork(ctx: ExtensionContext, incoming: RunState): Promise<void> {
+  async function scheduleNative(
+    ctx: ExtensionContext,
+    incoming: RunState,
+    kind: NativeEntry["kind"],
+    role?: IsolatedRole,
+  ): Promise<void> {
     let current = store.load() ?? incoming;
-    const retry = retryableItems(current.workItems);
-    if (!nextWave(current.workItems, config?.parallel).length && retry.length) {
-      const ids = new Set(retry.map((item) => item.id));
-      current = persist({
-        ...current,
-        workItems: current.workItems?.map((item) =>
-          ids.has(item.id)
-            ? { ...item, status: "pending", error: undefined, native: undefined }
-            : item,
-        ),
-      });
+    if (kind === "work" && !nextWave(current.workItems, config?.parallel).length) {
+      const ids = new Set(retryableItems(current.workItems).map((item) => item.id));
+      if (ids.size)
+        current = persist({
+          ...current,
+          workItems: current.workItems?.map((item) =>
+            ids.has(item.id)
+              ? { ...item, status: "pending", error: undefined, native: undefined }
+              : item,
+          ),
+        });
     }
-    const wave = nextWave(current.workItems, config?.parallel);
-    if (!wave.length) {
-      if (
+    if (kind === "scout" && !nextScoutWave(current.scoutItems, config?.parallel).length) {
+      const ids = new Set(retryableScouts(current.scoutItems).map((item) => item.id));
+      if (ids.size)
+        current = persist({
+          ...current,
+          scoutItems: current.scoutItems?.map((item) =>
+            ids.has(item.id)
+              ? { ...item, status: "pending", error: undefined, native: undefined }
+              : item,
+          ),
+        });
+    }
+    const wave =
+      kind === "work"
+        ? nextWave(current.workItems, config?.parallel)
+        : kind === "scout"
+          ? nextScoutWave(current.scoutItems, config?.parallel)
+          : [];
+    if (kind !== "role" && !wave.length) {
+      if (kind === "scout" && !(current.scoutItems ?? []).some((item) => item.status !== "done"))
+        persist(
+          goToStage(
+            { ...current, scoutNotes: compileScoutNotes(current.scoutItems, current.scoutNotes) },
+            "planner",
+          ),
+        );
+      else if (
+        kind === "work" &&
         !itemsRemaining(current.workItems).length &&
         !(current.workItems ?? []).some((item) => item.status === "failed")
-      ) {
+      )
         persist(enterReview(current));
-      } else {
+      else
         persist({
           ...current,
           pipelineLocked: false,
-          lastError:
-            "Implementation is blocked or failed. Use /devteam status, /devteam retry, or /devteam skip.",
+          lastError: `${kind === "scout" ? "Scouting" : "Implementation"} is incomplete. Use /devteam status, /devteam continue, or /devteam skip.`,
         });
-      }
       return;
     }
     const parentId = (ctx as ExtensionContext & { agent?: NativeAgent }).agent?.id;
     if (!parentId)
-      throw new Error("OMP main agent identity unavailable; cannot schedule native implementors.");
-    const ids = new Set(wave.map((item) => item.id));
-    const marker = randomUUID();
+      throw new Error("OMP main agent identity unavailable; cannot schedule native workers.");
+    const identity = (attempt: number) => ({
+      token: randomUUID(),
+      attempt,
+      parentId,
+      expectedAgentId: `Devteam${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+      host: hostname(),
+      pid: process.pid,
+    });
+    const entries: NativeEntry[] =
+      kind === "role"
+        ? [{ kind, role: role!, native: identity(1), prompt: "" }]
+        : wave.map((item) => ({
+            kind,
+            role: kind === "scout" ? "scout" : (item as WorkItem).layer,
+            id: item.id,
+            native: identity(item.attempts + 1),
+            prompt: "",
+            assignment: {
+              id: item.id,
+              title: item.title,
+              details: item.details,
+              files: item.files,
+              service: item.service,
+              list: kind === "scout" ? "scout" : "work",
+            },
+          }));
     const updated = store.mutate((run) => ({
       ...run,
       pipelineLocked: true,
       lastError: undefined,
-      workItems: run.workItems?.map((item) =>
-        ids.has(item.id)
-          ? {
-              ...item,
-              status: "running" as const,
-              attempts: item.attempts + 1,
-              error: undefined,
-              native: {
-                token: randomUUID(),
-                attempt: item.attempts + 1,
-                parentId,
-                expectedAgentId: `Devteam${randomUUID().replaceAll("-", "").slice(0, 20)}`,
-                host: hostname(),
-                pid: process.pid,
-              },
-            }
-          : item,
-      ),
+      currentRole: kind === "role" ? role : run.currentRole,
+      nativeRole:
+        kind === "role"
+          ? { role: role!, stage: run.stage, native: entries[0].native }
+          : run.nativeRole,
+      workItems:
+        kind === "work"
+          ? run.workItems?.map((item) => {
+              const entry = entries.find((v) => v.id === item.id);
+              return entry
+                ? {
+                    ...item,
+                    status: "running" as const,
+                    attempts: entry.native.attempt,
+                    error: undefined,
+                    native: entry.native,
+                  }
+                : item;
+            })
+          : run.workItems,
+      scoutItems:
+        kind === "scout"
+          ? run.scoutItems?.map((item) => {
+              const entry = entries.find((v) => v.id === item.id);
+              return entry
+                ? {
+                    ...item,
+                    status: "running" as const,
+                    attempts: entry.native.attempt,
+                    error: undefined,
+                    native: entry.native,
+                  }
+                : item;
+            })
+          : run.scoutItems,
     }));
     if (!updated) throw new Error("Cannot persist native assignments.");
-    nativeDispatch = {
-      marker,
-      items: (updated.workItems ?? []).filter((item) => ids.has(item.id)),
-      calls: new Map(),
-      stale: false,
-    };
+    for (const entry of entries) {
+      const prepared = childRunner.prepare(ctx, updated, entry.role, entry.assignment);
+      for (const warning of prepared.warnings) notify(ctx, warning, "warning");
+      entry.prompt = [
+        `Claim assignment first: call devteam_bind with jobId ${jobId} and token ${entry.native.token}.`,
+        prepared.rolePrompt,
+        prepared.childUserPrompt,
+      ].join("\n\n");
+    }
+    const marker = randomUUID();
+    nativeDispatch = { marker, items: entries, calls: new Map(), stale: false };
     applyParentTools(updated);
     await deliverUserPrompt(
-      `Devteam scheduler ${marker}: call the native task tool now. Use one task call with a tasks array if available, otherwise one flat task call. Arguments will be replaced by the scheduler. Do not perform implementation yourself.`,
+      `Devteam scheduler ${marker}: call the native task tool now. Use one task call with a tasks array if available, otherwise one flat task call. Arguments will be replaced by the scheduler. Do not perform the work yourself.`,
     );
   }
 
@@ -851,6 +988,21 @@ export default function (pi: ExtensionAPI) {
           ? { ...item, status: "failed" as const, error: reason, native: undefined }
           : item,
       ),
+      scoutItems: run.scoutItems?.map((item) =>
+        dispatch.items.some(
+          (assigned) =>
+            assigned.kind === "scout" &&
+            assigned.id === item.id &&
+            assigned.native.token === item.native?.token,
+        )
+          ? { ...item, status: "failed" as const, error: reason, native: undefined }
+          : item,
+      ),
+      nativeRole: dispatch.items.some(
+        (entry) => entry.kind === "role" && entry.native.token === run.nativeRole?.native.token,
+      )
+        ? undefined
+        : run.nativeRole,
       lastError: reason,
     }));
     applyParentTools(store.load());
@@ -1186,7 +1338,10 @@ export default function (pi: ExtensionAPI) {
             );
             return;
           case "spawn_scouts": {
-            await runDelegatedScouts(ctx, run);
+            if (isOmpHost()) {
+              await scheduleNative(ctx, run, "scout");
+              if (nativeDispatch) return;
+            } else await runDelegatedScouts(ctx, run);
             const afterScout = store.load();
             if (!afterScout || afterScout.halted) return;
             if (afterScout.stage === "scout") {
@@ -1204,7 +1359,7 @@ export default function (pi: ExtensionAPI) {
           }
           case "spawn_work": {
             if (isOmpHost()) {
-              await scheduleNativeWork(ctx, run);
+              await scheduleNative(ctx, run, "work");
               if (nativeDispatch) return;
             } else {
               await runDelegatedWork(ctx, run);
@@ -1237,6 +1392,10 @@ export default function (pi: ExtensionAPI) {
                 lastError: `No isolated role for stage ${run.stage}`,
                 stage: "error",
               });
+              return;
+            }
+            if (isOmpHost()) {
+              await scheduleNative(ctx, run, "role", role);
               return;
             }
             await spawnRole(ctx, run, role);
@@ -1349,43 +1508,92 @@ export default function (pi: ExtensionAPI) {
       )
         throw new Error("Invalid native assignment claim.");
       const path = runPaths(agentDirSafe(), params.jobId).json;
-      let matched: WorkItem | undefined;
+      let matched:
+        | { kind: NativeEntry["kind"]; role: IsolatedRole; id?: string; attempt: number }
+        | undefined;
       mutateRun(path, agentDirSafe(), (run) => {
-        if (
-          run.jobId !== params.jobId ||
-          run.cwd !== ctx.cwd ||
-          run.halted ||
-          run.stage !== "implement" ||
-          !run.pipelineLocked
-        )
+        if (run.jobId !== params.jobId || run.cwd !== ctx.cwd || run.halted || !run.pipelineLocked)
           return undefined;
-        const item = run.workItems?.find(
-          (candidate) =>
-            candidate.status === "running" &&
-            candidate.native?.token === params.token &&
-            candidate.native.attempt === candidate.attempts &&
-            candidate.native.parentId === agent.parentId &&
-            candidate.native.expectedAgentId === agent.id &&
-            (!candidate.native.agentId || candidate.native.agentId === agent.id),
-        );
-        if (!item?.native) return undefined;
-        matched = item;
-        return {
-          ...run,
-          workItems: run.workItems?.map((candidate) =>
-            candidate.id === item.id
-              ? { ...candidate, native: { ...item.native!, agentId: agent.id } }
-              : candidate,
-          ),
-        };
+        const valid = (identity: WorkItem["native"], role: IsolatedRole) =>
+          identity?.token === params.token &&
+          identity.parentId === agent.parentId &&
+          identity.expectedAgentId === agent.id &&
+          (!identity.agentId || identity.agentId === agent.id) &&
+          (agent.name === `devteam-${role.replaceAll("_", "-")}` ||
+            (agent.name === "devteam-implementor" &&
+              ["database", "backend", "frontend", "general"].includes(role)));
+        const work =
+          run.stage === "implement"
+            ? run.workItems?.find(
+                (item) =>
+                  item.status === "running" &&
+                  item.native?.attempt === item.attempts &&
+                  valid(item.native, item.layer),
+              )
+            : undefined;
+        const scout =
+          run.stage === "scout"
+            ? run.scoutItems?.find(
+                (item) =>
+                  item.status === "running" &&
+                  item.native?.attempt === item.attempts &&
+                  valid(item.native, "scout"),
+              )
+            : undefined;
+        const single =
+          run.nativeRole?.stage === run.stage && valid(run.nativeRole.native, run.nativeRole.role)
+            ? run.nativeRole
+            : undefined;
+        if (work?.native) {
+          matched = { kind: "work", role: work.layer, id: work.id, attempt: work.attempts };
+          return {
+            ...run,
+            workItems: run.workItems?.map((item) =>
+              item.id === work.id
+                ? { ...item, native: { ...work.native!, agentId: agent.id } }
+                : item,
+            ),
+          };
+        }
+        if (scout?.native) {
+          matched = { kind: "scout", role: "scout", id: scout.id, attempt: scout.attempts };
+          return {
+            ...run,
+            scoutItems: run.scoutItems?.map((item) =>
+              item.id === scout.id
+                ? { ...item, native: { ...scout.native!, agentId: agent.id } }
+                : item,
+            ),
+          };
+        }
+        if (single) {
+          matched = { kind: "role", role: single.role, attempt: single.native.attempt };
+          return {
+            ...run,
+            nativeRole: { ...single, native: { ...single.native, agentId: agent.id } },
+          };
+        }
+        return undefined;
       });
       if (!matched) throw new Error("Native assignment claim rejected.");
       nativeJobId = params.jobId;
       nativeTaskId = matched.id;
+      nativeKind = matched.kind;
+      nativeRole = matched.role;
       nativeAgentId = agent.id;
       nativeParentId = agent.parentId;
-      nativeAttempt = matched.attempts;
-      return { content: [{ type: "text" as const, text: `Bound work item ${matched.id}.` }] };
+      nativeAttempt = matched.attempt;
+      nativeToolCalls = 0;
+      nativeRecentTools = [];
+      touchNative(ctx);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Bound ${matched.role}${matched.id ? ` ${matched.id}` : ""}.`,
+          },
+        ],
+      };
     },
   });
 
@@ -1664,14 +1872,18 @@ export default function (pi: ExtensionAPI) {
         if (
           (sub === "continue" || sub === "resume") &&
           restText.toLowerCase() !== "list" &&
-          (restText || (run?.pipelineLocked && run.workItems?.some((item) => item.native)))
+          (restText ||
+            (run?.pipelineLocked &&
+              (run.nativeRole ||
+                run.workItems?.some((item) => item.native) ||
+                run.scoutItems?.some((item) => item.native))))
         ) {
           await resumeJob(ctx, restText || run!.jobId);
           return;
         }
         if (
           (run?.pipelineOwner && run.pipelineOwner !== owner) ||
-          (run?.pipelineLocked && !advancing)
+          (run?.pipelineLocked && !advancing && !(sub === "skip" && nativeDispatch))
         ) {
           notify(
             ctx,
@@ -1736,11 +1948,16 @@ export default function (pi: ExtensionAPI) {
             if (ctx.hasUI) ctx.ui.notify("No /devteam run to skip.", "warning");
             return;
           }
-          abortAllChildren();
+          standDown(ctx);
           abortParentTurn(ctx);
           resetDialogAbort();
           const next = store.mutate?.((latest) =>
-            applySkip({ ...latest, pipelineLocked: false, pendingHandoff: undefined }),
+            applySkip({
+              ...latest,
+              pipelineLocked: false,
+              pendingHandoff: undefined,
+              nativeRole: undefined,
+            }),
           );
           if (!next) return;
           if (
@@ -1795,7 +2012,12 @@ export default function (pi: ExtensionAPI) {
       if (childRole || nativeAgent(ctx)) return;
 
       const run = store.load();
-      if (run?.pipelineLocked && run.workItems?.some((item) => item.native)) {
+      if (
+        run?.pipelineLocked &&
+        (run.nativeRole ||
+          run.workItems?.some((item) => item.native) ||
+          run.scoutItems?.some((item) => item.native))
+      ) {
         notify(
           ctx,
           "Native work may still be active. Verify all previous hosts, workers, and subprocesses have stopped, then use /devteam continue.",
@@ -1816,8 +2038,16 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    stopNativeTimer();
     standDown();
     abortChild = undefined;
+  });
+
+  pi.on("message_update", (_event, ctx) => {
+    if (nativeAgent(ctx)) touchNative(ctx);
+  });
+  pi.on("agent_end", (_event, ctx) => {
+    if (nativeAgent(ctx)) stopNativeTimer();
   });
 
   pi.on("input", (event, ctx) => {
@@ -1871,11 +2101,29 @@ export default function (pi: ExtensionAPI) {
   if (isOmpHost()) {
     const on = pi.on as unknown as (
       event: string,
-      handler: (event: unknown, ctx: ExtensionContext) => void,
+      handler: (event: unknown, ctx: ExtensionContext) => unknown,
     ) => void;
     on("session_stop", (_event, ctx) => {
       if (nativeDispatch && !nativeDispatch.calls.size)
         failNativeDispatch(ctx, "Native task call was not dispatched.");
+    });
+    on("before_subagent_spawn", (event) => {
+      if (!nativeDispatch) return;
+      const spawn = event as { agent?: string | { name?: string; id?: string }; spawnKey?: string };
+      const name = typeof spawn.agent === "string" ? spawn.agent : spawn.agent?.name;
+      const id = typeof spawn.agent === "object" ? spawn.agent?.id : undefined;
+      const pending = [...nativeDispatch.calls.values()].flat();
+      const entry = pending.find(
+        (item) =>
+          name === `devteam-${item.role.replaceAll("_", "-")}` &&
+          (!id || id === item.native.expectedAgentId) &&
+          (!spawn.spawnKey ||
+            !pending.some((candidate) => candidate.native.expectedAgentId === spawn.spawnKey) ||
+            spawn.spawnKey === item.native.expectedAgentId),
+      );
+      if (!entry) return;
+      const run = store.load();
+      return { model: resolveChildModel(entry.role, undefined, config?.models, true, run?.stage) };
     });
   }
 
@@ -1887,25 +2135,15 @@ export default function (pi: ExtensionAPI) {
       const selected = batch ? dispatch.items : dispatch.items.slice(0, 1);
       if (!selected.length) return { block: true, reason: "No native assignments remain." };
       const tasks = selected.map((item) => {
-        const brief = [
-          `Claim assignment first: call devteam_bind with jobId ${jobId} and token ${item.native!.token}.`,
-          `Work item ${item.id}: ${item.title}`,
-          item.details,
-          `Assigned files: ${item.files.join(", ") || "(none)"}`,
-          item.service ? `Service: ${item.service}` : "",
-          "Read devteam_state for context. Work only within assigned scope. Call devteam_handoff with implementor_done when finished.",
-        ]
-          .filter(Boolean)
-          .join("\n");
         const base = {
-          name: item.native!.expectedAgentId,
-          agent: "devteam-implementor",
-          solutionSpace: "Implement assigned work item within specified scope.",
+          name: item.native.expectedAgentId,
+          agent: `devteam-${item.role.replaceAll("_", "-")}`,
+          solutionSpace: "Complete assigned devteam role within specified scope.",
         };
         const template = batch ? (input.tasks as Record<string, unknown>[])[0] : input;
         return template && Array.isArray(template.steps)
-          ? { ...base, steps: [brief] }
-          : { ...base, task: brief };
+          ? { ...base, steps: [item.prompt] }
+          : { ...base, task: item.prompt };
       });
       const callId = (event as { toolCallId?: string }).toolCallId;
       if (!callId) return { block: true, reason: "Native task call has no identity." };
@@ -1920,30 +2158,58 @@ export default function (pi: ExtensionAPI) {
         if (["read", "grep", "glob", "find", "yield"].includes(event.toolName)) return;
         return { block: true, reason: "Bind an active devteam assignment first." };
       }
+      touchNative(ctx);
+      if (event.toolName !== "devteam_handoff" && event.toolName !== "yield") {
+        nativeToolCalls += 1;
+        nativeRecentTools.push(describeToolCall(event.toolName, event.input));
+        if (nativeRecentTools.length > 40) nativeRecentTools.shift();
+        const repeat = resolveRepeatToolAbort(config?.repeatToolAbort);
+        const reason =
+          nativeToolCalls > resolveMaxToolCalls(config?.maxToolCalls, assignment.role)
+            ? "Devteam role tool-call budget exceeded."
+            : isRepeatedToolLoop(nativeRecentTools, repeat)
+              ? "Devteam role repeated an identical inspection."
+              : undefined;
+        if (reason) {
+          stopNativeTimer();
+          abortParentTurn(ctx);
+          return { block: true, reason };
+        }
+      }
       if (
-        ![
-          "read",
-          "grep",
-          "glob",
-          "find",
-          "bash",
-          "edit",
-          "write",
-          "devteam_state",
-          "devteam_handoff",
-          "yield",
-        ].includes(event.toolName)
+        ![...mapToolsForHost(toolsForRole(assignment.role), true), "yield"].includes(event.toolName)
       )
-        return { block: true, reason: "Tool unavailable to devteam implementors." };
+        return { block: true, reason: "Tool unavailable to this devteam role." };
       const input = event.input as Record<string, unknown>;
-      if (event.toolName === "devteam_handoff" && input.action !== "implementor_done")
-        return { block: true, reason: "Implementors may only hand off their assigned item." };
+      const handoffs: Record<IsolatedRole, string[]> = {
+        planner_orchestrator: ["scout_planned"],
+        scout: ["scout_done"],
+        plan_critic: ["critic_approve", "critic_revise"],
+        design_critic: ["critic_approve", "critic_revise"],
+        orchestrator: ["work_planned"],
+        database: ["implementor_done"],
+        backend: ["implementor_done"],
+        frontend: ["implementor_done"],
+        general: ["implementor_done"],
+        reviewer: ["qa_pass", "qa_fail"],
+        tester: ["qa_pass", "qa_fail"],
+        linter: ["qa_pass", "qa_fail"],
+        demo: ["qa_pass", "qa_fail"],
+        commit_message: ["commit_drafted"],
+      };
+      if (
+        event.toolName === "devteam_handoff" &&
+        !handoffs[assignment.role].includes(String(input.action))
+      )
+        return { block: true, reason: "Handoff unavailable to this devteam role." };
       if (
         event.toolName === "devteam_state" &&
         input.action !== "get" &&
-        input.section !== `${assignment.layer}Notes`
+        (assignment.role === "scout" ||
+          (["database", "backend", "frontend", "general"].includes(assignment.role) &&
+            input.section !== `${assignment.role}Notes`))
       )
-        return { block: true, reason: "Implementors may only update their own notes." };
+        return { block: true, reason: "State section unavailable to this devteam role." };
       if (isWriteTool(event.toolName) && !writePathFromInput(event.input)) {
         const patch = (event.input as Record<string, unknown>).input;
         if (event.toolName !== "edit" || typeof patch !== "string" || /^MV\s/m.test(patch))
@@ -1953,15 +2219,18 @@ export default function (pi: ExtensionAPI) {
         );
         if (!paths.length) return { block: true, reason: "Cannot verify edit paths." };
         const run = store.load();
-        const service = serviceByName(run?.stack?.services, assignment.service);
+        const service = serviceByName(
+          run?.stack?.services,
+          assignment.assignment?.service ?? run?.currentService,
+        );
         for (const path of paths) {
           const gate = gateWrite(
-            assignment.layer,
+            assignment.role,
             path,
             ctx.cwd,
             config ?? undefined,
             service,
-            assignment.files,
+            assignment.kind === "work" ? assignment.assignment?.files : undefined,
             run ? runPaths(agentDirSafe(), run.jobId).demoDir : undefined,
           );
           if (gate.block) return { block: true, reason: gate.reason };
@@ -1972,14 +2241,16 @@ export default function (pi: ExtensionAPI) {
       const run = store.load();
       if (!run || run.stage === "idle" || run.stage === "done") return;
     }
-    const role = assignment?.layer ?? currentRole(ctx);
+    const role = assignment?.role ?? currentRole(ctx);
     const current = store.load();
     const service = serviceByName(
       current?.stack?.services,
-      assignment?.service ?? childServiceName ?? current?.currentService,
+      assignment?.assignment?.service ?? childServiceName ?? current?.currentService,
     );
     const assigned = native
-      ? assignment?.files
+      ? assignment?.kind === "work"
+        ? assignment.assignment?.files
+        : undefined
       : childRole === "scout"
         ? undefined
         : findItem(current?.workItems, childTaskId)?.files;
@@ -2009,7 +2280,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("tool_result", (event, ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
     if (event.toolName !== "task" || !nativeDispatch || nativeAgent(ctx)) return;
     const dispatch = nativeDispatch;
     const callId = (event as { toolCallId?: string }).toolCallId;
@@ -2019,62 +2290,142 @@ export default function (pi: ExtensionAPI) {
     const details = (
       event as {
         details?: {
-          results?: Array<{ id?: string; exitCode?: number; error?: string; aborted?: boolean }>;
+          results?: Array<{
+            id?: string;
+            exitCode?: number;
+            error?: string;
+            aborted?: boolean;
+            output?: string;
+          }>;
         };
         isError?: boolean;
       }
     ).details;
     const finished = !dispatch.items.length && !dispatch.calls.size;
-    store.mutate((run) => {
-      const matches = assigned.every((expected) => {
-        const item = run.workItems?.find((candidate) => candidate.id === expected.id);
-        return (
-          item?.native &&
-          expected.native &&
-          item.attempts === expected.attempts &&
-          item.native.attempt === expected.native.attempt &&
-          item.native.token === expected.native.token &&
-          item.native.parentId === expected.native.parentId &&
-          item.native.expectedAgentId === expected.native.expectedAgentId &&
-          (!item.native.agentId || item.native.agentId === expected.native.expectedAgentId)
+    const singleton = assigned.find((entry) => entry.kind === "role");
+    const snapshot = singleton ? store.load() : undefined;
+    const singleResult =
+      singleton && details?.results?.find((item) => item.id === singleton.native.expectedAgentId);
+    let inferred: RunState | undefined;
+    if (
+      singleton &&
+      snapshot &&
+      !snapshot.halted &&
+      snapshot.pipelineLocked &&
+      snapshot.nativeRole?.native.token === singleton.native.token &&
+      snapshot.nativeRole.native.agentId === singleton.native.expectedAgentId &&
+      snapshot.nativeRole.stage === snapshot.stage &&
+      !snapshot.pendingHandoff &&
+      !event.isError &&
+      singleResult?.exitCode === 0 &&
+      !singleResult.aborted
+    ) {
+      try {
+        inferred = await childRunner.completeNative(
+          ctx,
+          snapshot,
+          singleton.role,
+          singleResult.output ?? "",
         );
-      });
-      if (!matches || run.halted || run.stage !== "implement" || !run.pipelineLocked) {
+      } catch (error) {
+        inferred = { ...snapshot, lastError: `Native result inference failed: ${String(error)}` };
+      }
+    }
+    if (nativeDispatch !== dispatch) return;
+    store.mutate((run) => {
+      const identityFor = (entry: NativeEntry) =>
+        entry.kind === "role"
+          ? run.nativeRole?.native
+          : entry.kind === "scout"
+            ? run.scoutItems?.find((item) => item.id === entry.id)?.native
+            : run.workItems?.find((item) => item.id === entry.id)?.native;
+      if (
+        run.halted ||
+        !run.pipelineLocked ||
+        assigned.some((entry) => {
+          const identity = identityFor(entry);
+          return (
+            !identity ||
+            identity.token !== entry.native.token ||
+            identity.attempt !== entry.native.attempt ||
+            identity.parentId !== entry.native.parentId ||
+            identity.expectedAgentId !== entry.native.expectedAgentId ||
+            (identity.agentId && identity.agentId !== identity.expectedAgentId) ||
+            (entry.kind === "role"
+              ? run.nativeRole?.stage !== run.stage
+              : run.stage !== (entry.kind === "scout" ? "scout" : "implement"))
+          );
+        })
+      ) {
         dispatch.stale = true;
         return undefined;
       }
-      return {
-        ...run,
-        pipelineLocked: finished && !dispatch.stale ? false : run.pipelineLocked,
-        workItems: run.workItems?.map((item) => {
-          if (!assigned.some((expected) => expected.id === item.id) || !item.native) return item;
-          const result = details?.results?.find(
-            (entry) => entry.id === item.native?.expectedAgentId,
-          );
-          const success =
-            !event.isError &&
-            result &&
-            result.exitCode === 0 &&
-            !result.aborted &&
-            item.native.agentId === item.native.expectedAgentId &&
-            item.status === "done";
-          return success
-            ? { ...item, native: undefined }
-            : {
-                ...item,
-                status: "failed" as const,
-                error:
-                  result?.error || "Native implementor failed or finished without a valid handoff.",
-                native: undefined,
-              };
-        }),
-      };
+      let next = { ...run };
+      for (const entry of assigned) {
+        const identity = identityFor(entry)!;
+        const result = details?.results?.find((item) => item.id === identity.expectedAgentId);
+        const success =
+          !event.isError &&
+          result?.exitCode === 0 &&
+          !result.aborted &&
+          identity.agentId === identity.expectedAgentId;
+        const error =
+          result?.error || `Native ${entry.role} failed or finished without a valid handoff.`;
+        if (entry.kind === "role") {
+          next = { ...next, nativeRole: undefined };
+          if (!success) next = { ...next, pendingHandoff: undefined, lastError: error };
+          else if (!next.pendingHandoff) {
+            if (
+              inferred &&
+              snapshot &&
+              JSON.stringify(next) === JSON.stringify({ ...snapshot, nativeRole: undefined })
+            ) {
+              next = { ...inferred, nativeRole: undefined };
+            } else {
+              next = { ...next, lastError: error };
+            }
+            if (next.stage === run.stage && !next.pendingHandoff && !next.halted)
+              next = { ...next, lastError: next.lastError ?? error };
+          }
+        } else if (entry.kind === "scout") {
+          next = {
+            ...next,
+            scoutItems: next.scoutItems?.map((item) =>
+              item.id !== entry.id
+                ? item
+                : success && item.status === "done" && item.findings?.trim()
+                  ? { ...item, native: undefined }
+                  : {
+                      ...item,
+                      status: "failed" as const,
+                      findings: undefined,
+                      native: undefined,
+                      error,
+                    },
+            ),
+          };
+        } else {
+          next = {
+            ...next,
+            workItems: next.workItems?.map((item) =>
+              item.id !== entry.id
+                ? item
+                : success && item.status === "done"
+                  ? { ...item, native: undefined }
+                  : { ...item, status: "failed" as const, native: undefined, error },
+            ),
+          };
+        }
+      }
+      return { ...next, pipelineLocked: finished && !dispatch.stale ? false : next.pipelineLocked };
     });
     if (finished) {
       nativeDispatch = undefined;
       if (!dispatch.stale) {
-        applyParentTools(store.load());
-        resumeNativePipeline(ctx);
+        const latest = store.load();
+        applyParentTools(latest);
+        if (!(assigned.some((entry) => entry.kind === "role") && latest?.lastError))
+          resumeNativePipeline(ctx);
       }
     } else if (!dispatch.stale && dispatch.items.length && !dispatch.calls.size) {
       void deliverUserPrompt(

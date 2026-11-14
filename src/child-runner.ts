@@ -145,17 +145,12 @@ function skillDirsForRole(
   return [...workflow, ...loaded.map((skill) => skill.dir)];
 }
 
-function writeRolePrompt(
-  deps: ChildRunnerDeps,
-  role: IsolatedRole,
-  extras: ResolvedSkill[],
-  taskId?: string,
-): string {
+function rolePrompt(role: IsolatedRole, extras: ResolvedSkill[]): string {
   const overflow = extras
     .filter((skill) => skill.source === "unresolved")
     .map((skill) => `- ${skill.name}: ${skill.error ?? "unresolved"}`)
     .join("\n");
-  const body = `${loadRolePrompt(role)}
+  return `${loadRolePrompt(role)}
 
 ## Stack skills
 
@@ -164,6 +159,14 @@ Follow /skill:<name> together with TDD at agreed seams when implementing.
 Do not start a nested /devteam pipeline. Do not git commit.
 ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow}\n` : ""}
 `;
+}
+
+function writeRolePrompt(
+  deps: ChildRunnerDeps,
+  role: IsolatedRole,
+  body: string,
+  taskId?: string,
+): string {
   const file = join(
     dirname(deps.statePath()),
     taskId ? `${role}.${taskId}.prompt.md` : `${role}.prompt.md`,
@@ -174,6 +177,135 @@ ${overflow ? `\nSkills not injected (cap, missing, or fetch failed):\n${overflow
 }
 
 export function createChildRunner(deps: ChildRunnerDeps) {
+  function prepare(
+    ctx: ExtensionContext,
+    run: RunState,
+    role: IsolatedRole,
+    assignment?: ChildAssignment,
+  ) {
+    const services = run.stack?.services ?? [];
+    const service = serviceByName(services, assignment?.service ?? run.currentService);
+    const extras = run.resolvedSkills?.[role] ?? [];
+    const skillDirs = skillDirsForRole(deps, role, run, ctx.cwd, service);
+    const latest = deps.store.load() ?? run;
+    const resolved = latest.resolvedSkills?.[role] ?? extras;
+    const unresolved = resolved.filter((skill) => skill.source === "unresolved");
+    const warnings = unresolved.length
+      ? [
+          `Stack skill fallback: ${unresolved.map((skill) => skill.name).join(", ")}. Continuing with workflow skills.`,
+        ]
+      : [];
+    const budget = resolveMaxToolCalls(deps.config()?.maxToolCalls, role);
+    return {
+      rolePrompt: rolePrompt(role, resolved),
+      childUserPrompt: childUserPrompt(
+        role,
+        latest.task,
+        skillDirs,
+        service,
+        services,
+        assignment,
+        budget,
+        role === "reviewer" ? reviewScope(latest) : {},
+      ),
+      skillDirs,
+      warnings,
+      budget,
+      service,
+      services,
+      latest,
+    };
+  }
+  async function completeNative(
+    ctx: ExtensionContext,
+    run: RunState,
+    role: IsolatedRole,
+    stdout: string,
+  ): Promise<RunState> {
+    const omp = deps.isOmp?.() ?? isOmpHost();
+    const config = deps.config();
+    const label = role.replaceAll("_", " ");
+    if (
+      (role === "tester" || role === "linter") &&
+      !run.pendingHandoff &&
+      (role === "tester" ? run.testFailed === undefined : run.lintErrors === undefined) &&
+      !stdout.trim()
+    ) {
+      return { ...run, lastError: `${label} finished without QA results or handoff.` };
+    }
+    let bashFailed =
+      (role === "tester" || role === "linter") && !run.pendingHandoff
+        ? bashFailedFromChildOutput(stdout)
+        : undefined;
+    let current = run;
+    const qaUnset =
+      role === "tester"
+        ? current.testFailed === undefined
+        : role === "linter"
+          ? current.lintErrors === undefined
+          : false;
+    if (
+      (role === "tester" || role === "linter") &&
+      !current.pendingHandoff &&
+      qaUnset &&
+      bashFailed !== false
+    ) {
+      const klass = await inferBashFailureFromJudge({
+        role,
+        stdout,
+        heuristic: bashFailed,
+        complete: deps.judgeComplete,
+        omp,
+        cwd: ctx.cwd,
+      });
+      const applied = applyBashFailureClass(bashFailed, klass);
+      if (applied.halt) {
+        const error = `${label}: ${applied.halt}. ${BASH_FAILURE_ADVICE[applied.halt]} /devteam continue retries.`;
+        return {
+          ...current,
+          pipelineLocked: false,
+          halted: true,
+          lastError: error,
+          currentStatus: error,
+          currentRole: role,
+        };
+      }
+      bashFailed = applied.failed;
+    }
+    const qaView =
+      bashFailed === undefined
+        ? current
+        : {
+            ...current,
+            testFailed:
+              role === "tester" && current.testFailed === undefined
+                ? bashFailed
+                : current.testFailed,
+            lintErrors:
+              role === "linter" && current.lintErrors === undefined
+                ? bashFailed
+                : current.lintErrors,
+          };
+    if (!current.pendingHandoff && !inferHandoffAction(role, qaView)) {
+      const judged = await inferHandoffFromJudge({
+        role,
+        run: current,
+        childStdout: stdout,
+        complete: deps.judgeComplete,
+        omp,
+        cwd: ctx.cwd,
+      });
+      if (judged) {
+        current = { ...current, pendingHandoff: { action: judged, summary: "inferred by @tiny" } };
+      }
+    }
+    return step(
+      current,
+      { type: "child_exit", role, bashFailed, globs: config?.paths },
+      config?.paths,
+    );
+  }
+
   async function run(
     ctx: ExtensionContext,
     run: RunState,
@@ -191,36 +323,19 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     const locked = deps.store.mutate(lock);
     if (!locked) return { ok: false, error: "active run no longer exists" };
     deps.refreshUi(ctx, locked);
-    const services = locked.stack?.services ?? [];
-    const service = serviceByName(services, assignment?.service ?? locked.currentService);
+    const prepared = prepare(ctx, locked, role, assignment);
+    const { service, skillDirs: dirs, budget, latest } = prepared;
     const label = assignment
       ? `${role.replaceAll("_", " ")} · ${assignment.id}`
       : service
         ? `${role.replaceAll("_", " ")} · ${service.name}`
         : role.replaceAll("_", " ");
 
-    const extras = (locked.resolvedSkills?.[role] ?? []) as ResolvedSkill[];
-    const dirs = skillDirsForRole(deps, role, locked, ctx.cwd, service);
-    const latest = deps.store.load() ?? locked;
-    const promptFile = writeRolePrompt(
-      deps,
-      role,
-      latest.resolvedSkills?.[role] ?? extras,
-      assignment?.id,
-    );
-    const unresolved = (latest.resolvedSkills?.[role] ?? []).filter(
-      (skill) => skill.source === "unresolved",
-    );
-    if (unresolved.length && ctx.hasUI) {
-      ctx.ui.notify(
-        `Stack skill fallback: ${unresolved.map((skill) => skill.name).join(", ")}. Continuing with workflow skills.`,
-        "warning",
-      );
+    const promptFile = writeRolePrompt(deps, role, prepared.rolePrompt, assignment?.id);
+    if (ctx.hasUI) {
+      for (const warning of prepared.warnings) ctx.ui.notify(warning, "warning");
     }
-
-    const budget = resolveMaxToolCalls(config?.maxToolCalls, role);
     const repeatLimit = resolveRepeatToolAbort(config?.repeatToolAbort);
-    const promptExtras = role === "reviewer" ? reviewScope(latest) : {};
     const omp = deps.isOmp?.() ?? isOmpHost();
     let args = buildChildCliArgs({
       omp,
@@ -235,16 +350,7 @@ export function createChildRunner(deps: ChildRunnerDeps) {
       trusted: deps.trusted ? deps.trusted(ctx) : projectTrusted(ctx),
       serviceName: service?.name,
       taskId: assignment?.id,
-      prompt: childUserPrompt(
-        role,
-        latest.task,
-        dirs,
-        service,
-        services,
-        assignment,
-        budget,
-        promptExtras,
-      ),
+      prompt: prepared.childUserPrompt,
     });
     const activityKey = assignment?.id ?? role;
     const activity: ChildActivity = {
@@ -486,91 +592,26 @@ export function createChildRunner(deps: ChildRunnerDeps) {
       return { ok: true };
     }
 
-    let bashFailed =
-      (role === "tester" || role === "linter") && !after.pendingHandoff
-        ? bashFailedFromChildOutput(result.stdout)
-        : undefined;
-    let current = deps.store.load() ?? after;
-    const qaUnset =
-      role === "tester"
-        ? current.testFailed === undefined
-        : role === "linter"
-          ? current.lintErrors === undefined
-          : false;
-    if (
-      (role === "tester" || role === "linter") &&
-      !current.pendingHandoff &&
-      qaUnset &&
-      bashFailed !== false
-    ) {
-      const klass = await inferBashFailureFromJudge({
-        role,
-        stdout: result.stdout,
-        heuristic: bashFailed,
-        complete: deps.judgeComplete,
-        omp,
-        cwd: ctx.cwd,
-      });
-      if (deps.statePath() !== statePath) {
-        return { ok: false, error: "active run changed while child was running" };
-      }
-      const applied = applyBashFailureClass(bashFailed, klass);
-      if (applied.halt) {
-        const error = `${label}: ${applied.halt}. ${BASH_FAILURE_ADVICE[applied.halt]} /devteam continue retries.`;
-        deps.persist({
-          ...current,
-          pipelineLocked: false,
-          halted: true,
-          lastError: error,
-          currentStatus: error,
-          currentRole: role,
-        });
-        deps.logProgress(ctx, { kind: "error", role: activity.role, text: error }, "warning");
-        return { ok: false, error };
-      }
-      bashFailed = applied.failed;
+    const completed = await completeNative(ctx, deps.store.load() ?? after, role, result.stdout);
+    if (deps.statePath() !== statePath) {
+      return { ok: false, error: "active run changed while child was running" };
     }
-    const qaView =
-      bashFailed === undefined
-        ? current
-        : {
-            ...current,
-            testFailed:
-              role === "tester" && current.testFailed === undefined
-                ? bashFailed
-                : current.testFailed,
-            lintErrors:
-              role === "linter" && current.lintErrors === undefined
-                ? bashFailed
-                : current.lintErrors,
-          };
-    if (!current.pendingHandoff && !inferHandoffAction(role, qaView)) {
-      const judged = await inferHandoffFromJudge({
-        role,
-        run: current,
-        childStdout: result.stdout,
-        complete: deps.judgeComplete,
-        omp,
-        cwd: ctx.cwd,
-      });
-      if (deps.statePath() !== statePath) {
-        return { ok: false, error: "active run changed while child was running" };
-      }
-      if (judged) {
-        current = deps.persist({
-          ...current,
-          pendingHandoff: { action: judged, summary: "inferred by @tiny" },
-        });
-        deps.logProgress(ctx, {
-          kind: "stage",
-          role: activity.role,
-          text: `${label} inferred ${judged} via @tiny`,
-        });
-      }
+    const resolved = deps.persist(completed);
+    if (resolved.halted && resolved.lastError && !after.halted) {
+      deps.logProgress(
+        ctx,
+        { kind: "error", role: activity.role, text: resolved.lastError },
+        "warning",
+      );
+      return { ok: false, error: resolved.lastError };
     }
-    const resolved = deps.persist(
-      step(current, { type: "child_exit", role, bashFailed, globs: config?.paths }, config?.paths),
-    );
+    if (!after.pendingHandoff && resolved.pendingHandoff?.summary === "inferred by @tiny") {
+      deps.logProgress(ctx, {
+        kind: "stage",
+        role: activity.role,
+        text: `${label} inferred ${resolved.pendingHandoff.action} via @tiny`,
+      });
+    }
     if (resolved.pendingHandoff || resolved.stage !== locked.stage || resolved.halted) {
       return { ok: true };
     }
@@ -579,7 +620,7 @@ export function createChildRunner(deps: ChildRunnerDeps) {
     return { ok: false, error };
   }
 
-  return { run };
+  return { run, prepare, completeNative };
 }
 
 export type ChildRunner = ReturnType<typeof createChildRunner>;
