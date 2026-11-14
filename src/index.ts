@@ -880,22 +880,29 @@ export default function (pi: ExtensionAPI) {
     const parentId = (ctx as ExtensionContext & { agent?: NativeAgent }).agent?.id;
     if (!parentId)
       throw new Error("OMP main agent identity unavailable; cannot schedule native workers.");
-    const identity = (attempt: number) => ({
+    const identity = (attempt: number, role: IsolatedRole, title = "") => ({
       token: randomUUID(),
       attempt,
       parentId,
-      expectedAgentId: `Devteam${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+      expectedAgentId: `${`${role} ${title}`
+        .replace(/[^a-zA-Z0-9]+(.)?/g, (_, next: string | undefined) => next?.toUpperCase() ?? "")
+        .replace(/^./, (first) => first.toUpperCase())
+        .slice(0, 12)}${randomUUID().replaceAll("-", "").slice(0, 20)}`,
       host: hostname(),
       pid: process.pid,
     });
     const entries: NativeEntry[] =
       kind === "role"
-        ? [{ kind, role: role!, native: identity(1), prompt: "" }]
+        ? [{ kind, role: role!, native: identity(1, role!), prompt: "" }]
         : wave.map((item) => ({
             kind,
             role: kind === "scout" ? "scout" : (item as WorkItem).layer,
             id: item.id,
-            native: identity(item.attempts + 1),
+            native: identity(
+              item.attempts + 1,
+              kind === "scout" ? "scout" : (item as WorkItem).layer,
+              item.title,
+            ),
             prompt: "",
             assignment: {
               id: item.id,

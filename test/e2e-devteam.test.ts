@@ -451,6 +451,7 @@ test("OMP native wave rewrites task and accepts only claimed settled result", as
   await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
   const assignment = loadRun(path)!.workItems![0];
   assert.equal(assignment.status, "running");
+  assert.match(assignment.native!.expectedAgentId, /^GeneralOne[0-9a-f]{20}$/);
   const [rewrite] = host.emit(
     "tool_call",
     {
@@ -501,6 +502,33 @@ test("OMP native wave rewrites task and accepts only claimed settled result", as
   assert.equal(loadRun(path)!.workItems![0].native, undefined);
 });
 
+test("OMP assigns distinct valid names to concurrent workers with identical titles", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devteam-native-names-"));
+  const { host, ctx, agentDir } = await bootDevteam(root);
+  process.env.DEVTEAM_HOST = "omp";
+  const mainCtx = { ...ctx, agent: { kind: "main", id: "Main", name: "main" } };
+  const run = {
+    ...emptyRun("e2e-session", "implement feature", "nativenames1"),
+    cwd: ctx.cwd,
+    stage: "implement" as const,
+    workItems: ["one", "two"].map((id) => ({
+      id,
+      layer: "backend" as const,
+      title: "Auth / session with long title",
+      files: [`${id}.ts`],
+      dependsOn: [],
+      status: "pending" as const,
+      attempts: 0,
+    })),
+  };
+  const path = runPaths(agentDir, run.jobId).json;
+  saveRun(path, run, agentDir);
+  await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
+  const names = loadRun(path)!.workItems!.map((item) => item.native!.expectedAgentId);
+  assert.equal(new Set(names).size, 2);
+  for (const name of names) assert.match(name, /^BackendAuthS[0-9a-f]{20}$/);
+});
+
 test("OMP dispatches a singleton role and advances only after its claimed result", async () => {
   const root = mkdtempSync(join(tmpdir(), "devteam-native-role-"));
   const { host, ctx, agentDir } = await bootDevteam(root);
@@ -518,6 +546,7 @@ test("OMP dispatches a singleton role and advances only after its claimed result
   await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
   const assignment = loadRun(path)!.nativeRole!;
   assert.equal(assignment.role, "plan_critic");
+  assert.match(assignment.native.expectedAgentId, /^PlanCritic[0-9a-f]{20}$/);
   const [rewrite] = host.emit(
     "tool_call",
     {
@@ -598,6 +627,7 @@ test("OMP dispatches scouts and records findings from a bound settled worker", a
   await host.commands.get("devteam")!.handler(`continue ${run.jobId}`, mainCtx);
   const assignment = loadRun(path)!.scoutItems![0];
   assert.equal(assignment.status, "running");
+  assert.match(assignment.native!.expectedAgentId, /^ScoutMapRepo[0-9a-f]{20}$/);
   const [rewrite] = host.emit(
     "tool_call",
     {
